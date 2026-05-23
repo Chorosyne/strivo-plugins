@@ -108,10 +108,52 @@ pub fn open_and_init(db_path: &Path) -> Result<Connection> {
         "ALTER TABLE videos ADD COLUMN prompt_tokens INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE videos ADD COLUMN completion_tokens INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE videos ADD COLUMN cost_cents INTEGER NOT NULL DEFAULT 0",
+        // C5 — word-level timings from whisperx / voxtral preserved as
+        // a JSON-array sidecar on the segment row. Format:
+        // `[{"w":"hello","s":1.234,"e":1.380,"c":0.97}, ...]`
+        // The Editor plugin reads this to render the transcript-as-
+        // timeline with word-accurate in/out marks; Insights uses it
+        // to compute speaker airtime by word count.
+        "ALTER TABLE segments ADD COLUMN word_timings TEXT",
     ] {
         let _ = conn.execute(stmt, []);
     }
     Ok(conn)
+}
+
+/// Read the word-timings JSON for a segment. Returns `None` when the
+/// transcribe backend didn't emit per-word timings (whisper-cli for
+/// example) — callers fall back to segment-level start/end in that case.
+#[allow(dead_code)] // consumed by Editor plugin (E1)
+pub fn segment_word_timings(
+    conn: &Connection,
+    video_id: i64,
+    segment_index: i64,
+) -> Result<Option<String>> {
+    let row: Option<Option<String>> = conn
+        .query_row(
+            "SELECT word_timings FROM segments WHERE video_id = ?1 AND segment_index = ?2",
+            rusqlite::params![video_id, segment_index],
+            |row| row.get(0),
+        )
+        .ok();
+    Ok(row.flatten())
+}
+
+/// Persist a JSON-encoded word-timings array on the segment. Idempotent
+/// — overwrites prior contents.
+#[allow(dead_code)] // populated by transcribe backends in subsequent commit
+pub fn set_segment_word_timings(
+    conn: &Connection,
+    video_id: i64,
+    segment_index: i64,
+    json: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE segments SET word_timings = ?1 WHERE video_id = ?2 AND segment_index = ?3",
+        rusqlite::params![json, video_id, segment_index],
+    )?;
+    Ok(())
 }
 
 pub fn insert_video(
@@ -420,6 +462,7 @@ pub fn load_full_segments(conn: &Connection, video_id: i64) -> Result<Vec<super:
                 text: row.get(3)?,
                 speaker: row.get(4)?,
                 confidence: row.get(5)?,
+                words: None, // hydrate via segment_word_timings() on demand
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;

@@ -165,6 +165,7 @@ mod tests {
             text: String::new(),
             speaker: Some(speaker.to_string()),
             confidence: None,
+            words: None,
         }
     }
 
@@ -218,6 +219,7 @@ mod tests {
                 text: String::new(),
                 speaker: None,
                 confidence: None,
+                words: None,
             },
             seg("A", 10.0, 8.0), // negative duration, ignored
             seg("A", 20.0, 25.0),

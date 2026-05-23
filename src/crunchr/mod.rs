@@ -614,6 +614,7 @@ impl CrunchrPlugin {
                             text: text.clone(),
                             speaker: None,
                             confidence: None,
+                            words: None,
                         })
                         .collect();
 
@@ -2142,6 +2143,7 @@ mod tests {
             text: text.to_string(),
             speaker: speaker.map(|s| s.to_string()),
             confidence: None,
+            words: None,
         }
     }
 

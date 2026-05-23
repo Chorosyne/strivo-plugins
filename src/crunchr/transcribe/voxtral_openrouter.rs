@@ -83,6 +83,7 @@ impl TranscriptionBackend for VoxtralOpenRouterBackend {
                 text: full_text.clone(),
                 speaker: None,
                 confidence: None,
+                words: None, // openrouter returns plain text, no timings
             }]
         };
 

@@ -284,6 +284,7 @@ mod tests {
             text: text.to_string(),
             speaker: None,
             confidence: None,
+            words: None,
         }
     }
 

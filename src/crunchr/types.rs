@@ -2,6 +2,26 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use uuid::Uuid;
 
+/// Word-level timing emitted by alignment-capable backends
+/// (whisperx_local, voxtral-local in word-mode). Backends that don't
+/// produce word timings leave `Segment::words` as `None`; the Editor
+/// plugin falls back to segment-level seek when that's the case.
+///
+/// Persisted as a JSON array on `segments.word_timings`. Compact field
+/// names keep the column small in sqlite for long-form transcripts.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct WordTiming {
+    /// The word as the backend emitted it (no normalization).
+    pub w: String,
+    /// Start time in seconds relative to the recording origin.
+    pub s: f64,
+    /// End time in seconds. Always `>= s`.
+    pub e: f64,
+    /// Optional alignment confidence (0.0–1.0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub c: Option<f64>,
+}
+
 /// Config modal state for the Crunchr plugin.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigModalState {
@@ -253,7 +273,7 @@ pub struct AnalysisData {
     pub sentiment: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Segment {
     pub index: usize,
     pub start_sec: f64,
@@ -261,6 +281,10 @@ pub struct Segment {
     pub text: String,
     pub speaker: Option<String>,
     pub confidence: Option<f64>,
+    /// Word-level timings if the backend produced them. Editor plugin
+    /// reads this for word-accurate in/out marks; serialized to the
+    /// `segments.word_timings` JSON column when present (C5).
+    pub words: Option<Vec<WordTiming>>,
 }
 
 /// Summary of Crunchr processing for a single recording, used by the properties modal.

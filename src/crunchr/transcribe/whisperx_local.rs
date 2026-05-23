@@ -180,13 +180,29 @@ impl TranscriptionBackend for WhisperxLocalBackend {
             .map(|segs| {
                 segs.iter()
                     .enumerate()
-                    .map(|(i, seg)| Segment {
-                        index: seg["index"].as_u64().map(|n| n as usize).unwrap_or(i),
-                        start_sec: seg["start"].as_f64().unwrap_or(0.0),
-                        end_sec: seg["end"].as_f64().unwrap_or(0.0),
-                        text: seg["text"].as_str().unwrap_or("").trim().to_string(),
-                        speaker: seg["speaker"].as_str().map(String::from),
-                        confidence: seg["confidence"].as_f64(),
+                    .map(|(i, seg)| {
+                        // whisperx emits word-level timings in seg["words"];
+                        // preserve them for the Editor plugin (C5).
+                        let words: Option<Vec<crate::crunchr::types::WordTiming>> =
+                            seg["words"].as_array().map(|ws| {
+                                ws.iter()
+                                    .map(|w| crate::crunchr::types::WordTiming {
+                                        w: w["word"].as_str().unwrap_or("").to_string(),
+                                        s: w["start"].as_f64().unwrap_or(0.0),
+                                        e: w["end"].as_f64().unwrap_or(0.0),
+                                        c: w["score"].as_f64().or_else(|| w["confidence"].as_f64()),
+                                    })
+                                    .collect()
+                            });
+                        Segment {
+                            index: seg["index"].as_u64().map(|n| n as usize).unwrap_or(i),
+                            start_sec: seg["start"].as_f64().unwrap_or(0.0),
+                            end_sec: seg["end"].as_f64().unwrap_or(0.0),
+                            text: seg["text"].as_str().unwrap_or("").trim().to_string(),
+                            speaker: seg["speaker"].as_str().map(String::from),
+                            confidence: seg["confidence"].as_f64(),
+                            words,
+                        }
                     })
                     .collect()
             })

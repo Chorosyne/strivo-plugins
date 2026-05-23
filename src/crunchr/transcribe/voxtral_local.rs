@@ -81,6 +81,7 @@ impl TranscriptionBackend for VoxtralLocalBackend {
                         text: seg["text"].as_str().unwrap_or("").trim().to_string(),
                         speaker: None, // open-source models have no diarization
                         confidence: seg["avg_logprob"].as_f64(),
+                        words: None, // word-level timings not emitted in segment mode
                     })
                     .collect()
             })

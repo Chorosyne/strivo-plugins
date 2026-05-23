@@ -102,6 +102,7 @@ impl TranscriptionBackend for WhisperCLIBackend {
                                 text: seg["text"].as_str().unwrap_or("").trim().to_string(),
                                 speaker: None, // whisper CLI has no diarization
                                 confidence: seg["avg_logprob"].as_f64(),
+                                words: None, // whisper-cli does not emit word timings
                             })
                             .collect()
                     })

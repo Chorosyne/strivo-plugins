@@ -82,6 +82,7 @@ impl TranscriptionBackend for VoxtralApiBackend {
                             .or_else(|| seg["speaker"].as_str())
                             .map(String::from),
                         confidence: seg["avg_logprob"].as_f64(),
+                        words: None, // voxtral-api segment-mode response
                     })
                     .collect()
             })
