@@ -407,7 +407,7 @@ fn render_analytics_pane(frame: &mut Frame, area: Rect, analysis: &super::types:
 
 /// Render the processing queue inline in the content area
 fn render_queue_inline(
-    _plugin: &CrunchrPlugin,
+    plugin: &CrunchrPlugin,
     frame: &mut Frame,
     area: Rect,
     active: &[&super::types::ProcessingJob],
@@ -424,11 +424,21 @@ fn render_queue_inline(
         Line::raw(""),
     ];
 
+    // M3 — `queue_cursor` indexes into the merged queue (active then
+    // complete) in the same order as plugin.queue. Find the focused
+    // job once so the inline render can mark it.
+    let focused_id = plugin
+        .queue
+        .get(plugin.queue_cursor)
+        .map(|j| j.recording_id);
+
     for job in active {
+        let is_focused = Some(job.recording_id) == focused_id;
+        let cursor_prefix = if is_focused { "▶ " } else { "  " };
         let indicator = match job.state {
-            PipelineState::Pending => Span::styled("  ○ ", Style::new().fg(Theme::dim())),
-            PipelineState::Failed => Span::styled("  ✗ ", Style::new().fg(Theme::red())),
-            _ => Span::styled("  ● ", Style::new().fg(Theme::secondary())),
+            PipelineState::Pending => Span::styled("○ ", Style::new().fg(Theme::dim())),
+            PipelineState::Failed => Span::styled("✗ ", Style::new().fg(Theme::red())),
+            _ => Span::styled("● ", Style::new().fg(Theme::secondary())),
         };
 
         let title: String = format!("{} - {}", job.channel_name, job.title)
@@ -436,9 +446,18 @@ fn render_queue_inline(
             .take(area.width.saturating_sub(6) as usize)
             .collect();
 
+        let title_style = if is_focused {
+            Style::new()
+                .fg(Theme::primary())
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::new().fg(Theme::fg())
+        };
+
         lines.push(Line::from(vec![
+            Span::styled(cursor_prefix, Style::new().fg(Theme::secondary())),
             indicator,
-            Span::styled(title, Style::new().fg(Theme::fg())),
+            Span::styled(title, title_style),
         ]));
 
         let state_style = match job.state {
@@ -451,14 +470,46 @@ fn render_queue_inline(
             format!("    {}...", job.state)
         };
         lines.push(Line::styled(detail, state_style));
+
+        // M3 — when this row is focused AND failed, surface the
+        // verb chips inline so the user sees the available actions
+        // without flipping to the help overlay.
+        if is_focused && job.state == PipelineState::Failed {
+            lines.push(Line::from(vec![
+                Span::styled("    ", Style::new()),
+                Span::styled(
+                    "[R]",
+                    Style::new()
+                        .fg(Theme::secondary())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" retry  ", Style::new().fg(Theme::muted())),
+                Span::styled(
+                    "[S]",
+                    Style::new()
+                        .fg(Theme::secondary())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" skip  ", Style::new().fg(Theme::muted())),
+                Span::styled(
+                    "[X]",
+                    Style::new()
+                        .fg(Theme::secondary())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" cancel", Style::new().fg(Theme::muted())),
+            ]));
+        }
         lines.push(Line::raw(""));
     }
 
     for job in complete {
+        let is_focused = Some(job.recording_id) == focused_id;
+        let cursor_prefix = if is_focused { "▶ " } else { "  " };
         let indicator = if job.state == PipelineState::Complete {
-            Span::styled("  ✓ ", Style::new().fg(Theme::green()))
+            Span::styled("✓ ", Style::new().fg(Theme::green()))
         } else {
-            Span::styled("  ✗ ", Style::new().fg(Theme::red()))
+            Span::styled("✗ ", Style::new().fg(Theme::red()))
         };
 
         let title: String = format!("{} - {}", job.channel_name, job.title)
@@ -466,16 +517,52 @@ fn render_queue_inline(
             .take(area.width.saturating_sub(6) as usize)
             .collect();
 
+        let title_style = if is_focused {
+            Style::new()
+                .fg(Theme::primary())
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::new().fg(Theme::muted())
+        };
+
         lines.push(Line::from(vec![
+            Span::styled(cursor_prefix, Style::new().fg(Theme::secondary())),
             indicator,
-            Span::styled(title, Style::new().fg(Theme::muted())),
+            Span::styled(title, title_style),
         ]));
+
+        if is_focused && job.state == PipelineState::Failed {
+            lines.push(Line::from(vec![
+                Span::styled("    ", Style::new()),
+                Span::styled(
+                    "[R]",
+                    Style::new()
+                        .fg(Theme::secondary())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" retry  ", Style::new().fg(Theme::muted())),
+                Span::styled(
+                    "[S]",
+                    Style::new()
+                        .fg(Theme::secondary())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" skip  ", Style::new().fg(Theme::muted())),
+                Span::styled(
+                    "[X]",
+                    Style::new()
+                        .fg(Theme::secondary())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" cancel", Style::new().fg(Theme::muted())),
+            ]));
+        }
     }
 
     // Hint
     lines.push(Line::raw(""));
     lines.push(Line::styled(
-        "  Press / to search transcripts",
+        "  [j/k] nav  [Shift+R/S/X] retry/skip/cancel  [/] search",
         Style::new().fg(Theme::muted()),
     ));
 

@@ -283,6 +283,10 @@ pub struct CrunchrPlugin {
     pub speaker_modal: SpeakerModalState,
     /// Current view mode.
     pub view: CrunchrView,
+    /// Cursor into the Queue view's row list (active + complete
+    /// merged). Used by M3 retry/skip/cancel verbs to pick the
+    /// focused job. Clamped against the queue len on render.
+    pub queue_cursor: usize,
     /// Recording picker state.
     pub picker: PickerState,
     /// Cached channel list for the config modal tandem checkboxes.
@@ -340,6 +344,7 @@ impl CrunchrPlugin {
             config_draft: None,
             speaker_modal: SpeakerModalState::Hidden,
             view: CrunchrView::Search,
+            queue_cursor: 0,
             picker: PickerState::default(),
             cached_channels: Vec::new(),
             diarize_override_jobs: HashSet::new(),
@@ -1354,16 +1359,135 @@ impl CrunchrPlugin {
 
     /// Handle keys in the Queue view.
     fn handle_queue_key(&mut self, key: KeyEvent) -> Vec<PluginAction> {
+        let queue_len = self.queue.len();
+        if queue_len > 0 && self.queue_cursor >= queue_len {
+            self.queue_cursor = queue_len - 1;
+        }
         match key.code {
             KeyCode::Tab => {
                 self.view = CrunchrView::RecordingPicker;
+                return Vec::new();
             }
             KeyCode::Esc => {
                 self.view = CrunchrView::Search;
+                return Vec::new();
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                if queue_len > 0 {
+                    self.queue_cursor = (self.queue_cursor + 1) % queue_len;
+                }
+                return Vec::new();
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if queue_len > 0 {
+                    self.queue_cursor = if self.queue_cursor == 0 {
+                        queue_len - 1
+                    } else {
+                        self.queue_cursor - 1
+                    };
+                }
+                return Vec::new();
+            }
+            KeyCode::Char('R') if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                // M3 — Retry the focused failed job. Drops from queue
+                // + in_flight and re-runs queue_recording (same path
+                // as the 'Re-transcribe' verb).
+                return self.retry_focused_queue_job();
+            }
+            KeyCode::Char('S') if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                // M3 — Skip: remove the focused job from the queue
+                // entirely. Mirrors the corresponding host stage as
+                // Skipped so the DAG overlay reflects it.
+                return self.skip_focused_queue_job();
+            }
+            KeyCode::Char('X') if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                // M3 — Cancel: identical to Skip today (we don't
+                // have a long-running task to abort once the future
+                // is spawned; this just drops the queue entry and
+                // marks the host mirror Cancelled).
+                return self.cancel_focused_queue_job();
             }
             _ => {}
         }
         Vec::new()
+    }
+
+    /// M3 — drop the focused queue job + re-enqueue it. The host DAG
+    /// mirror sees the new SubmitPipeline; the old pipeline_id is
+    /// orphaned (left in the registry's "complete" state for the
+    /// user to scroll through history).
+    fn retry_focused_queue_job(&mut self) -> Vec<PluginAction> {
+        let Some(job) = self.queue.get(self.queue_cursor).cloned() else {
+            return Vec::new();
+        };
+        self.in_flight.remove(&job.recording_id);
+        self.queue.retain(|j| j.recording_id != job.recording_id);
+        let mut actions = self.queue_recording(
+            job.recording_id,
+            job.channel_name.clone(),
+            job.title.clone(),
+            job.video_path.clone(),
+        );
+        actions.push(PluginAction::SetStatus(format!(
+            "retrying {}",
+            job.title.chars().take(40).collect::<String>()
+        )));
+        actions
+    }
+
+    /// M3 — drop the focused job + emit Skipped on each of its host
+    /// stages so the DAG overlay marks them grey rather than leaving
+    /// them as ghost Pending entries.
+    fn skip_focused_queue_job(&mut self) -> Vec<PluginAction> {
+        let Some(job) = self.queue.get(self.queue_cursor).cloned() else {
+            return Vec::new();
+        };
+        let mut actions: Vec<PluginAction> = Vec::new();
+        if let Some(ids) = job.host_stages.as_ref() {
+            for sid in [Some(ids.extract), Some(ids.transcribe), Some(ids.subtitle), ids.analyze]
+                .into_iter()
+                .flatten()
+            {
+                actions.push(PluginAction::UpdateStage {
+                    stage_id: sid,
+                    new_state: PipelineStageUpdate::Skipped,
+                });
+            }
+        }
+        self.in_flight.remove(&job.recording_id);
+        self.queue.retain(|j| j.recording_id != job.recording_id);
+        actions.push(PluginAction::SetStatus(format!(
+            "skipped {}",
+            job.title.chars().take(40).collect::<String>()
+        )));
+        actions
+    }
+
+    /// M3 — same shape as skip but emits Cancelled instead of Skipped
+    /// so the user can tell the difference in the DAG overlay.
+    fn cancel_focused_queue_job(&mut self) -> Vec<PluginAction> {
+        let Some(job) = self.queue.get(self.queue_cursor).cloned() else {
+            return Vec::new();
+        };
+        let mut actions: Vec<PluginAction> = Vec::new();
+        if let Some(ids) = job.host_stages.as_ref() {
+            for sid in [Some(ids.extract), Some(ids.transcribe), Some(ids.subtitle), ids.analyze]
+                .into_iter()
+                .flatten()
+            {
+                actions.push(PluginAction::UpdateStage {
+                    stage_id: sid,
+                    new_state: PipelineStageUpdate::Cancelled,
+                });
+            }
+        }
+        self.in_flight.remove(&job.recording_id);
+        self.queue.retain(|j| j.recording_id != job.recording_id);
+        actions.push(PluginAction::SetStatus(format!(
+            "cancelled {}",
+            job.title.chars().take(40).collect::<String>()
+        )));
+        actions
     }
 
     /// Handle keys in the RecordingPicker view.
