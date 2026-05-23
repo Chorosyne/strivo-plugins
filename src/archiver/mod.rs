@@ -2,6 +2,7 @@ mod db;
 mod downloader;
 pub mod render;
 mod scanner;
+pub mod templates;
 pub mod types;
 
 use std::any::Any;
