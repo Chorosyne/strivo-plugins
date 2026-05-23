@@ -1,0 +1,64 @@
+# Build
+/target
+**/*.rs.bk
+
+# Secrets / local env
+.env
+.env.local
+*.pem
+*.key
+
+# Coverage / profiling
+*.profraw
+*.profdata
+tarpaulin-report.*
+cobertura.xml
+lcov.info
+flamegraph.svg
+perf.data
+perf.data.old
+
+# Python tooling caches (scripts/)
+__pycache__/
+*.pyc
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.venv/
+venv/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+\#*\#
+.#*
+
+# Agent / tool state
+.gstack/
+.claude/
+.aider*
+.cursor/
+.continue/
+.roo/
+
+# OS cruft
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs & runtime
+*.log
+*.log.*
+*.pid
+*.sock
+
+# Backups & scratch
+*.bak
+*.backup
+*.orig
+*.rej
+/tmp/
+/scratch/
