@@ -455,6 +455,57 @@ pub fn render_config_modal(plugin: &ArchiverPlugin, frame: &mut Frame, area: Rec
     ));
     field_idx += 1;
 
+    // R4 — live preview against a sample VOD blob. Refreshes every
+    // keystroke when the user is editing the format. Also surfaces a
+    // matching template name when the user's string is one of the
+    // built-in presets, so they can see "you're using ByDate" at a
+    // glance.
+    {
+        use crate::archiver::templates::{FormatTemplate, SampleMetadata};
+        let sample = SampleMetadata::default();
+        let preview = FormatTemplate::Custom.preview(Some(&draft.format), &sample);
+        let matched = FormatTemplate::all()
+            .iter()
+            .find(|t| t.yt_dlp_template(None) == draft.format)
+            .map(|t| t.label())
+            .unwrap_or("custom");
+        lines.push(Line::from(vec![
+            Span::raw("   "),
+            Span::styled(
+                "preview:".to_string(),
+                Style::new().fg(Theme::dim()),
+            ),
+            Span::raw(" "),
+            Span::styled(preview, Style::new().fg(Theme::secondary())),
+            Span::styled(
+                format!("  [{matched}]"),
+                Style::new().fg(Theme::dim()),
+            ),
+        ]));
+        // One-shot hint listing the built-in templates so users can
+        // paste them. Only shown when the user is editing the Format
+        // field — at all other times the modal stays compact.
+        if editing && selected_field == 2 {
+            lines.push(Line::from(Span::styled(
+                "     templates: ByDate · ByPlaylist · ByChannel · Flat".to_string(),
+                Style::new().fg(Theme::dim()),
+            )));
+            for t in FormatTemplate::all() {
+                lines.push(Line::from(vec![
+                    Span::raw("     "),
+                    Span::styled(
+                        format!("{}: ", t.label()),
+                        Style::new().fg(Theme::muted()),
+                    ),
+                    Span::styled(
+                        t.yt_dlp_template(None),
+                        Style::new().fg(Theme::dim()),
+                    ),
+                ]));
+            }
+        }
+    }
+
     // Field 3: Concurrent Fragments
     lines.push(add_field(
         "Fragments",
