@@ -12,4 +12,5 @@
 pub mod archiver;
 pub mod crunchr;
 pub mod dirs;
+pub mod editor;
 pub mod insights;
