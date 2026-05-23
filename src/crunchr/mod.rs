@@ -127,6 +127,29 @@ pub const PANE_ID: PaneId = "crunchr";
 /// Sanitize a string for use in a filename — strip path separators,
 /// control chars, and characters Windows hates. Spaces collapse to
 /// underscores so users can shell-tab-complete the output.
+/// Translate a target state on a Crunchr job into the host
+/// `UpdateStage` actions that mirror it. Pure — reads the job's
+/// `host_stages` and emits zero or more PluginActions. Returns an
+/// empty vec when the job has no host stages registered (older
+/// jobs from before C1 phase 2) or when the transition doesn't
+/// correspond to a finished host stage. (M1 — intermediate emits.)
+fn emit_for_state(
+    job: &ProcessingJob,
+    target: PipelineState,
+    error: Option<String>,
+) -> Vec<PluginAction> {
+    let Some(ids) = job.host_stages.as_ref() else {
+        return Vec::new();
+    };
+    host_stage_for_transition(ids, target, error)
+        .into_iter()
+        .map(|(stage_id, new_state)| PluginAction::UpdateStage {
+            stage_id,
+            new_state,
+        })
+        .collect()
+}
+
 fn sanitize_for_filename(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -627,15 +650,27 @@ impl CrunchrPlugin {
             }
             PipelineState::ExtractingAudio => {
                 if !self.backend_available {
+                    let mut emit = emit_for_state(
+                        &self.queue[job_idx],
+                        PipelineState::Failed,
+                        Some("No transcription backend available".into()),
+                    );
                     self.queue[job_idx].state = PipelineState::Failed;
                     self.queue[job_idx].error =
                         Some("No transcription backend available".to_string());
                     self.in_flight.remove(&recording_id);
-                    return vec![PluginAction::SetStatus(
+                    emit.push(PluginAction::SetStatus(
                         "CrunchR: no transcription backend".to_string(),
-                    )];
+                    ));
+                    return emit;
                 }
                 let audio_path = self.queue[job_idx].audio_path.clone().unwrap_or_default();
+                // M1 — mirror Extract Done before flipping state.
+                let mut emit = emit_for_state(
+                    &self.queue[job_idx],
+                    PipelineState::Transcribing,
+                    None,
+                );
                 self.queue[job_idx].state = PipelineState::Transcribing;
                 if let Some(conn) = self.db.as_ref() {
                     let _ = db::update_video_status(
@@ -651,7 +686,7 @@ impl CrunchrPlugin {
                     .pick_backend_for(recording_id)
                     .or_else(|| self.backend.clone())
                     .unwrap();
-                vec![PluginAction::SpawnTask {
+                emit.push(PluginAction::SpawnTask {
                     plugin_name: "crunchr",
                     future: Box::pin(async move {
                         // Retry transient transcription errors. Three
@@ -694,9 +729,16 @@ impl CrunchrPlugin {
                             ),
                         }) as Box<dyn Any + Send>
                     }),
-                }]
+                });
+                emit
             }
             PipelineState::Transcribing => {
+                // M1 — mirror Transcribe + Subtitle Done before flipping.
+                let mut emit = emit_for_state(
+                    &self.queue[job_idx],
+                    PipelineState::Chunking,
+                    None,
+                );
                 self.queue[job_idx].state = PipelineState::Chunking;
                 if let Some(conn) = self.db.as_ref() {
                     let _ =
@@ -726,7 +768,7 @@ impl CrunchrPlugin {
                         .collect();
 
                     // Spawn chunking + word frequency computation off the event loop
-                    vec![PluginAction::SpawnTask {
+                    emit.push(PluginAction::SpawnTask {
                         plugin_name: "crunchr",
                         future: Box::pin(async move {
                             // CPU-intensive work in spawn_blocking
@@ -766,18 +808,25 @@ impl CrunchrPlugin {
                                 }) as Box<dyn Any + Send>,
                             }
                         }),
-                    }]
+                    });
+                    emit
                 } else {
+                    let mut fail_emit = Vec::new();
                     if let Some(job) = self
                         .queue
                         .iter_mut()
                         .find(|j| j.recording_id == recording_id)
                     {
+                        fail_emit = emit_for_state(
+                            job,
+                            PipelineState::Failed,
+                            Some("No segments found for chunking".into()),
+                        );
                         job.state = PipelineState::Failed;
                         job.error = Some("No segments found for chunking".to_string());
                     }
                     self.in_flight.remove(&recording_id);
-                    Vec::new()
+                    fail_emit
                 }
             }
             _ => Vec::new(),
