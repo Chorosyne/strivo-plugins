@@ -264,20 +264,129 @@ fn sanitize_fts_query(query: &str) -> String {
 }
 
 pub fn fts_search(conn: &Connection, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+    fts_search_with_facets(conn, query, &SearchFacets::default(), limit)
+}
+
+/// Filters that narrow an FTS search post-hoc. Empty/None fields mean
+/// "no filter on that field". (C4.)
+#[derive(Debug, Clone, Default)]
+pub struct SearchFacets {
+    /// Restrict to chunks where any speaker matches one of these labels.
+    pub speakers: Vec<String>,
+    /// Channel-name substring match (case-insensitive).
+    pub channel: Option<String>,
+    /// `videos.created_at >= this RFC3339 timestamp` when set.
+    pub since: Option<String>,
+    /// `videos.created_at < this RFC3339 timestamp` when set.
+    pub until: Option<String>,
+    /// `video_analysis.sentiment LIKE 'positive%'` (or 'negative' /
+    /// 'neutral'); maps to a case-insensitive prefix match.
+    pub sentiment: Option<String>,
+    /// Minimum video duration in seconds.
+    pub min_duration_secs: Option<f64>,
+    /// Maximum video duration in seconds.
+    pub max_duration_secs: Option<f64>,
+}
+
+/// Faceted FTS search. Same shape as [`fts_search`] but the WHERE clause
+/// also enforces channel / date / speaker / sentiment / duration
+/// constraints. (C4 M4 stretch.)
+pub fn fts_search_with_facets(
+    conn: &Connection,
+    query: &str,
+    facets: &SearchFacets,
+    limit: usize,
+) -> Result<Vec<SearchResult>> {
     let safe_query = sanitize_fts_query(query);
 
-    let mut stmt = conn.prepare(
+    let mut sql = String::from(
         "SELECT c.id, v.title, v.channel_name, snippet(chunks_fts, 0, '>>>', '<<<', '...', 40), c.start_sec, c.end_sec, rank, v.video_path
          FROM chunks_fts
          JOIN chunks c ON c.id = chunks_fts.rowid
-         JOIN videos v ON v.id = c.video_id
-         WHERE chunks_fts MATCH ?1
-         ORDER BY rank
-         LIMIT ?2",
-    )?;
+         JOIN videos v ON v.id = c.video_id",
+    );
+    let mut joins = Vec::new();
+    let mut conds: Vec<String> = vec!["chunks_fts MATCH :q".into()];
+    let mut params: Vec<(&str, Box<dyn rusqlite::ToSql>)> = vec![
+        (":q", Box::new(safe_query)),
+        (":lim", Box::new(limit as i64)),
+    ];
 
+    if let Some(ch) = &facets.channel {
+        conds.push("LOWER(v.channel_name) LIKE :ch".into());
+        params.push((
+            ":ch",
+            Box::new(format!("%{}%", ch.to_lowercase())),
+        ));
+    }
+    if let Some(since) = &facets.since {
+        conds.push("v.created_at >= :since".into());
+        params.push((":since", Box::new(since.clone())));
+    }
+    if let Some(until) = &facets.until {
+        conds.push("v.created_at < :until".into());
+        params.push((":until", Box::new(until.clone())));
+    }
+    if let Some(sent) = &facets.sentiment {
+        joins.push(
+            "LEFT JOIN video_analysis va ON va.video_id = v.id"
+                .to_string(),
+        );
+        conds.push("LOWER(va.sentiment) LIKE :sent".into());
+        params.push((
+            ":sent",
+            Box::new(format!("{}%", sent.to_lowercase())),
+        ));
+    }
+    if !facets.speakers.is_empty() {
+        joins.push(
+            "INNER JOIN segments seg ON seg.video_id = v.id \
+             AND seg.start_sec <= c.end_sec \
+             AND seg.end_sec   >= c.start_sec"
+                .to_string(),
+        );
+        // SQLite parameter list expansion via JSON array — robust against
+        // arbitrary speaker counts without dynamic placeholder generation.
+        let json = serde_json::to_string(&facets.speakers)?;
+        conds.push("seg.speaker IN (SELECT value FROM json_each(:spk))".into());
+        params.push((":spk", Box::new(json)));
+    }
+    if let Some(min) = facets.min_duration_secs {
+        // Recordings table stores duration via segments; approximate
+        // using the MAX(end_sec) per video.
+        joins.push(
+            "INNER JOIN (SELECT video_id, MAX(end_sec) AS dur FROM segments GROUP BY video_id) dseg \
+             ON dseg.video_id = v.id"
+                .to_string(),
+        );
+        conds.push("dseg.dur >= :mind".into());
+        params.push((":mind", Box::new(min)));
+    }
+    if let Some(max) = facets.max_duration_secs {
+        if !joins.iter().any(|j| j.contains("dseg")) {
+            joins.push(
+                "INNER JOIN (SELECT video_id, MAX(end_sec) AS dur FROM segments GROUP BY video_id) dseg \
+                 ON dseg.video_id = v.id"
+                    .to_string(),
+            );
+        }
+        conds.push("dseg.dur <= :maxd".into());
+        params.push((":maxd", Box::new(max)));
+    }
+
+    for j in &joins {
+        sql.push(' ');
+        sql.push_str(j);
+    }
+    sql.push_str(" WHERE ");
+    sql.push_str(&conds.join(" AND "));
+    sql.push_str(" ORDER BY rank LIMIT :lim");
+
+    let mut stmt = conn.prepare(&sql)?;
+    let param_refs: Vec<(&str, &dyn rusqlite::ToSql)> =
+        params.iter().map(|(k, v)| (*k, v.as_ref())).collect();
     let results = stmt
-        .query_map(rusqlite::params![safe_query, limit], |row| {
+        .query_map(param_refs.as_slice(), |row| {
             Ok(SearchResult {
                 chunk_id: row.get(0)?,
                 video_title: row.get(1)?,
@@ -290,7 +399,6 @@ pub fn fts_search(conn: &Connection, query: &str, limit: usize) -> Result<Vec<Se
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
-
     Ok(results)
 }
 
