@@ -708,6 +708,8 @@ impl CrunchrPlugin {
             analysis: CrunchrAnalysisConfig::default(),
             tandem_channels: self.tandem_channels.clone(),
             tandem_playlists: self.tandem_playlists.clone(),
+            budget_cents_per_month: 0,
+            active_preset: None,
         };
         // Try to read current config values from analysis_config
         if let Some(ref ac) = self.analysis_config {
