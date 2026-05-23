@@ -2,6 +2,7 @@ pub mod analysis;
 pub mod cost;
 mod db;
 mod pipeline;
+pub mod presets;
 pub mod render;
 pub mod transcribe;
 pub mod types;

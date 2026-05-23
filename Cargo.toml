@@ -50,6 +50,8 @@ rust-stemmers = "1.2"
 unicode-segmentation = "1.12"
 base64 = "0.22"
 which = "7"
+toml = "0.8"
+dirs = "5"
 
 [profile.release]
 strip = true
