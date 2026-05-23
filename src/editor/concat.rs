@@ -107,6 +107,120 @@ pub fn build_concat_argv(
     })
 }
 
+/// Multi-VOD clip — references a recording by index into the source
+/// list, plus its own in/out word indices and label. (E3.)
+#[derive(Debug, Clone)]
+pub struct CompilationClip {
+    /// Index into the `sources` Vec passed to
+    /// [`build_compilation_argv`].
+    pub source_index: usize,
+    /// In/out word indices into that source's word stream.
+    pub in_word: u32,
+    pub out_word: u32,
+    pub label: String,
+}
+
+/// One source recording in a compilation EDL. Carries the path + the
+/// word stream so the renderer can resolve word indices → seconds
+/// without round-tripping back to Crunchr's DB. (E3.)
+pub struct CompilationSource {
+    pub path: PathBuf,
+    pub words: Vec<(String, f64)>,
+}
+
+/// Build the ffmpeg concat command for a multi-VOD compilation. Each
+/// clip can point at a different source; the demuxer file lists each
+/// source's `file 'path'` line before every clip's
+/// `inpoint/outpoint` pair. Output lands next to the first source.
+pub fn build_compilation_argv(
+    clips: &[CompilationClip],
+    sources: &[CompilationSource],
+    output_label: &str,
+) -> Result<ConcatPlan> {
+    if clips.is_empty() {
+        return Err(anyhow!("no clips to concat"));
+    }
+    if sources.is_empty() {
+        return Err(anyhow!("no sources supplied"));
+    }
+    let mut list = String::new();
+    for c in clips {
+        let source = sources.get(c.source_index).ok_or_else(|| {
+            anyhow!(
+                "clip {}: source_index {} out of range (have {} sources)",
+                c.label,
+                c.source_index,
+                sources.len()
+            )
+        })?;
+        let in_secs = source
+            .words
+            .get(c.in_word as usize)
+            .map(|(_, s)| *s)
+            .ok_or_else(|| anyhow!("clip {}: in_word out of range", c.label))?;
+        let out_secs = source
+            .words
+            .get(c.out_word as usize)
+            .map(|(_, s)| *s)
+            .ok_or_else(|| anyhow!("clip {}: out_word out of range", c.label))?;
+        if out_secs <= in_secs {
+            return Err(anyhow!(
+                "clip {}: out_secs ({:.2}) ≤ in_secs ({:.2})",
+                c.label,
+                out_secs,
+                in_secs
+            ));
+        }
+        list.push_str(&format!("file '{}'\n", source.path.display()));
+        list.push_str(&format!("inpoint {in_secs:.3}\n"));
+        list.push_str(&format!("outpoint {out_secs:.3}\n"));
+    }
+
+    let first = &sources[0].path;
+    let output_dir = first
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let safe_label: String = output_label
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(*c, '-' | '_'))
+        .collect();
+    let label = if safe_label.is_empty() {
+        "compilation".to_string()
+    } else {
+        safe_label
+    };
+    let concat_file_path = output_dir.join(format!("{label}.compilation.txt"));
+    let output_path = output_dir.join(format!("{label}.compilation.mkv"));
+
+    let argv = vec![
+        "ffmpeg".to_string(),
+        "-y".to_string(),
+        "-f".into(),
+        "concat".into(),
+        "-safe".into(),
+        "0".into(),
+        "-protocol_whitelist".into(),
+        "file,pipe".into(),
+        "-i".into(),
+        concat_file_path.to_string_lossy().into_owned(),
+        "-c".into(),
+        "copy".into(),
+        "-map".into(),
+        "0".into(),
+        "-avoid_negative_ts".into(),
+        "make_zero".into(),
+        output_path.to_string_lossy().into_owned(),
+    ];
+
+    Ok(ConcatPlan {
+        argv,
+        concat_file_path,
+        concat_file_contents: list,
+        output_path,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,6 +263,81 @@ mod tests {
             &Some(PathBuf::from("/tmp/x.mkv")),
         );
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn compilation_fans_across_sources() {
+        let sources = vec![
+            CompilationSource {
+                path: PathBuf::from("/tmp/show-1.mkv"),
+                words: vec![("hello".into(), 0.0), ("world".into(), 1.5)],
+            },
+            CompilationSource {
+                path: PathBuf::from("/tmp/show-2.mkv"),
+                words: vec![("good".into(), 0.0), ("night".into(), 2.0)],
+            },
+        ];
+        let clips = vec![
+            CompilationClip {
+                source_index: 0,
+                in_word: 0,
+                out_word: 1,
+                label: "a".into(),
+            },
+            CompilationClip {
+                source_index: 1,
+                in_word: 0,
+                out_word: 1,
+                label: "b".into(),
+            },
+        ];
+        let plan = build_compilation_argv(&clips, &sources, "highlight-reel").unwrap();
+        assert!(plan.concat_file_contents.contains("show-1.mkv"));
+        assert!(plan.concat_file_contents.contains("show-2.mkv"));
+        // 'inpoint 0.000' appears once per clip.
+        assert_eq!(
+            plan.concat_file_contents.matches("inpoint 0.000").count(),
+            2
+        );
+        assert!(plan
+            .output_path
+            .to_string_lossy()
+            .ends_with("highlight-reel.compilation.mkv"));
+    }
+
+    #[test]
+    fn compilation_rejects_bad_source_index() {
+        let sources = vec![CompilationSource {
+            path: PathBuf::from("/tmp/x.mkv"),
+            words: vec![("a".into(), 0.0), ("b".into(), 1.0)],
+        }];
+        let clips = vec![CompilationClip {
+            source_index: 99,
+            in_word: 0,
+            out_word: 1,
+            label: "x".into(),
+        }];
+        assert!(build_compilation_argv(&clips, &sources, "r").is_err());
+    }
+
+    #[test]
+    fn compilation_label_sanitization() {
+        let sources = vec![CompilationSource {
+            path: PathBuf::from("/tmp/x.mkv"),
+            words: vec![("a".into(), 0.0), ("b".into(), 1.0)],
+        }];
+        let clips = vec![CompilationClip {
+            source_index: 0,
+            in_word: 0,
+            out_word: 1,
+            label: "x".into(),
+        }];
+        let plan = build_compilation_argv(&clips, &sources, "Highlight Reel!!!").unwrap();
+        // Non-alnum chars stripped.
+        assert!(plan
+            .output_path
+            .to_string_lossy()
+            .contains("HighlightReel"));
     }
 
     #[test]

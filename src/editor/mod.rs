@@ -35,6 +35,7 @@ use strivo_core::plugin::{
 };
 
 pub mod concat;
+pub mod filter;
 
 pub const EDITOR_PANE: PaneId = "editor";
 
