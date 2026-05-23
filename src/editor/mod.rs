@@ -63,10 +63,33 @@ pub struct EditorPlugin {
     recording_id: Option<String>,
     /// Crunchr DB path resolved at init.
     crunchr_db: PathBuf,
-    /// View — Timeline (E1), Compilation (E3 stub), Filter (E4 stub).
+    /// View — Timeline (E1), Compilation (E3), Filter (E4 stub).
     view: EditorView,
     /// Status surfaced to the host.
     last_status: Option<String>,
+    /// E3 Compilation — sources the user can pull clips from. Index 0
+    /// mirrors the Timeline-view's loaded recording so a clip marked
+    /// there can be added to the compilation without re-loading.
+    comp_sources: Vec<CompilationSourceState>,
+    /// Index into [`comp_sources`] for the active compilation source.
+    comp_active: usize,
+    /// Cross-source clip list — each clip references a source by index.
+    comp_clips: Vec<concat::CompilationClip>,
+    /// User-supplied name for the compilation output file.
+    comp_label: String,
+}
+
+/// One source recording loaded into the Compilation view. (E3.)
+#[derive(Debug, Clone)]
+pub struct CompilationSourceState {
+    pub recording_id: String,
+    pub display_name: String,
+    pub path: PathBuf,
+    pub words: Vec<(String, f64)>,
+    /// Per-source cursor so switching back to a source restores the
+    /// user's position.
+    pub cursor: u32,
+    pub pending_in: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,6 +117,10 @@ impl EditorPlugin {
             crunchr_db: PathBuf::new(),
             view: EditorView::Timeline,
             last_status: None,
+            comp_sources: Vec::new(),
+            comp_active: 0,
+            comp_clips: Vec::new(),
+            comp_label: "compilation".to_string(),
         }
     }
 
@@ -180,6 +207,144 @@ impl EditorPlugin {
         let mut p = path.clone();
         p.set_extension("edl.json");
         Some(p)
+    }
+
+    /// E3 — pull the active source's word stream + cursor refs as a
+    /// mutable handle. Used by every mark/cursor mutation in the
+    /// compilation view.
+    fn comp_source_mut(&mut self) -> Option<&mut CompilationSourceState> {
+        self.comp_sources.get_mut(self.comp_active)
+    }
+
+    fn comp_source(&self) -> Option<&CompilationSourceState> {
+        self.comp_sources.get(self.comp_active)
+    }
+
+    /// Add the current Timeline recording as a Compilation source. The
+    /// user calls this with `[a]` from the Compilation view; idempotent
+    /// when the same recording is added twice.
+    fn comp_add_current(&mut self) {
+        let Some(rec_id) = self.recording_id.clone() else {
+            self.last_status =
+                Some("load a recording in Timeline first ([1] view)".into());
+            return;
+        };
+        if self
+            .comp_sources
+            .iter()
+            .any(|s| s.recording_id == rec_id)
+        {
+            self.last_status = Some("source already in compilation".into());
+            return;
+        }
+        let path = match self.recording_path.clone() {
+            Some(p) => p,
+            None => {
+                self.last_status = Some("Timeline recording has no path".into());
+                return;
+            }
+        };
+        let display = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(&rec_id)
+            .to_string();
+        self.comp_sources.push(CompilationSourceState {
+            recording_id: rec_id,
+            display_name: display,
+            path,
+            words: self.words.clone(),
+            cursor: 0,
+            pending_in: None,
+        });
+        self.comp_active = self.comp_sources.len().saturating_sub(1);
+        self.last_status = Some(format!(
+            "added source ({} total)",
+            self.comp_sources.len()
+        ));
+    }
+
+    /// Append a compilation clip from the active source's pending in
+    /// + cursor.
+    fn comp_finalize_clip(&mut self) {
+        // Read source data without overlapping mutable borrows.
+        let active_idx = self.comp_active;
+        let (in_word, out_word, words_snapshot) = match self.comp_sources.get(active_idx)
+        {
+            Some(s) => {
+                let Some(in_w) = s.pending_in else {
+                    self.last_status =
+                        Some("mark in with [v] in this source first".into());
+                    return;
+                };
+                if in_w >= s.cursor {
+                    self.last_status =
+                        Some("in must precede out — move the cursor right".into());
+                    return;
+                }
+                (in_w, s.cursor, s.words.clone())
+            }
+            None => {
+                self.last_status =
+                    Some("no compilation source ([a] adds current Timeline)".into());
+                return;
+            }
+        };
+        let label = words_snapshot
+            .iter()
+            .skip(in_word as usize)
+            .take((out_word - in_word) as usize)
+            .map(|(w, _)| w.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(40)
+            .collect::<String>();
+        self.comp_clips.push(concat::CompilationClip {
+            source_index: active_idx,
+            in_word,
+            out_word,
+            label,
+        });
+        if let Some(s) = self.comp_source_mut() {
+            s.pending_in = None;
+        }
+        self.last_status = Some(format!(
+            "compilation clip added ({} total)",
+            self.comp_clips.len()
+        ));
+    }
+
+    /// E3 — synthesize the multi-source ffmpeg argv from the current
+    /// compilation state. Surfaces the result via the status bar; the
+    /// host pipeline executor spawns the actual ffmpeg.
+    fn comp_export(&mut self) {
+        if self.comp_clips.is_empty() {
+            self.last_status =
+                Some("compilation is empty — mark clips first".into());
+            return;
+        }
+        let sources: Vec<concat::CompilationSource> = self
+            .comp_sources
+            .iter()
+            .map(|s| concat::CompilationSource {
+                path: s.path.clone(),
+                words: s.words.clone(),
+            })
+            .collect();
+        match concat::build_compilation_argv(&self.comp_clips, &sources, &self.comp_label) {
+            Ok(plan) => {
+                self.last_status = Some(format!(
+                    "compilation ready ({} clips, {} sources) → {}",
+                    self.comp_clips.len(),
+                    self.comp_sources.len(),
+                    plan.output_path.display()
+                ));
+            }
+            Err(e) => {
+                self.last_status = Some(format!("compilation synthesis failed: {e}"));
+            }
+        }
     }
 
     /// Append a new clip from the pending in-mark and the cursor.
@@ -291,6 +456,11 @@ impl Plugin for EditorPlugin {
             Char('2') => self.view = EditorView::Compilation,
             Char('3') => self.view = EditorView::Filter,
             _ => {}
+        }
+        // E3 — Compilation view owns its own key handling. The
+        // Timeline-view loop below is single-source-only.
+        if matches!(self.view, EditorView::Compilation) {
+            return self.on_compilation_key(key);
         }
         if was_empty && self.words.is_empty() {
             // Lazy-load on first key.
@@ -408,12 +578,7 @@ impl Plugin for EditorPlugin {
 
         match self.view {
             EditorView::Timeline => self.render_timeline(frame, body_area),
-            EditorView::Compilation => render_stub(
-                frame,
-                body_area,
-                "Compilation",
-                "E3 stub — multi-VOD compilation. M5. Today: single-VOD only.",
-            ),
+            EditorView::Compilation => self.render_compilation(frame, body_area),
             EditorView::Filter => render_stub(
                 frame,
                 body_area,
@@ -459,6 +624,227 @@ impl Plugin for EditorPlugin {
 }
 
 impl EditorPlugin {
+    /// E3 — Compilation view key handler. Operates on the active
+    /// source's per-source cursor + pending_in. Switches sources via
+    /// `[` / `]`.
+    fn on_compilation_key(&mut self, key: crossterm::event::KeyEvent) -> Vec<PluginAction> {
+        use crossterm::event::KeyCode::*;
+        use crossterm::event::KeyModifiers as M;
+        match key.code {
+            Char('a') => {
+                self.comp_add_current();
+                return Vec::new();
+            }
+            Char('[') => {
+                if !self.comp_sources.is_empty() {
+                    self.comp_active = if self.comp_active == 0 {
+                        self.comp_sources.len() - 1
+                    } else {
+                        self.comp_active - 1
+                    };
+                }
+                return Vec::new();
+            }
+            Char(']') => {
+                if !self.comp_sources.is_empty() {
+                    self.comp_active = (self.comp_active + 1) % self.comp_sources.len();
+                }
+                return Vec::new();
+            }
+            Char('x') => {
+                self.comp_export();
+                return Vec::new();
+            }
+            Char('D') if key.modifiers.contains(M::SHIFT) => {
+                if !self.comp_clips.is_empty() {
+                    self.comp_clips.pop();
+                    self.last_status = Some(format!(
+                        "removed clip ({} left)",
+                        self.comp_clips.len()
+                    ));
+                }
+                return Vec::new();
+            }
+            _ => {}
+        }
+
+        // Movement + marks against the active source.
+        let Some(source) = self.comp_source_mut() else {
+            self.last_status = Some(
+                "no sources yet — load a recording in Timeline + press [a] here".into(),
+            );
+            return Vec::new();
+        };
+        let words_len = source.words.len();
+        match key.code {
+            Char('h') | Left => source.cursor = source.cursor.saturating_sub(1),
+            Char('l') | Right => {
+                if (source.cursor as usize) + 1 < words_len {
+                    source.cursor += 1;
+                }
+            }
+            Char('w') if key.modifiers.contains(M::CONTROL) => {
+                source.cursor = ((source.cursor as usize + 10)
+                    .min(words_len.saturating_sub(1)))
+                    as u32;
+            }
+            Char('b') if key.modifiers.contains(M::CONTROL) => {
+                source.cursor = source.cursor.saturating_sub(10);
+            }
+            Char('v') => {
+                source.pending_in = Some(source.cursor);
+                let c = source.cursor;
+                self.last_status =
+                    Some(format!("in @ word {c} — switch sources with [/] then Enter"));
+            }
+            Char('o') | Enter => {
+                self.comp_finalize_clip();
+            }
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    /// E3 — render the Compilation view. Top half lists loaded
+    /// sources with a `▶` marker on the active one; bottom half shows
+    /// the source's word window + the cross-source clip list.
+    fn render_compilation(&self, frame: &mut Frame, area: Rect) {
+        if self.comp_sources.is_empty() {
+            let lines = vec![
+                Line::from(Span::styled(
+                    "Compilation is empty",
+                    Style::new().add_modifier(Modifier::BOLD),
+                )),
+                Line::raw(""),
+                Line::from(Span::styled(
+                    "Load a recording in [1] Timeline, then return here and press [a] to add it as a source.",
+                    Style::new().add_modifier(Modifier::DIM),
+                )),
+                Line::raw(""),
+                Line::from(Span::styled(
+                    "Once you have ≥1 source: [h/l] move cursor · [v] mark in · [o/Enter] mark out + add clip · [/]/[] switch sources · [x] export · [Shift+D] remove last clip",
+                    Style::new().add_modifier(Modifier::DIM),
+                )),
+            ];
+            frame.render_widget(
+                Paragraph::new(lines).wrap(Wrap { trim: false }),
+                area,
+            );
+            return;
+        }
+
+        let [header_area, body_area, clip_area] = Layout::vertical([
+            Constraint::Length(self.comp_sources.len() as u16 + 1),
+            Constraint::Fill(2),
+            Constraint::Fill(1),
+        ])
+        .areas(area);
+
+        // Source list.
+        let mut header_lines: Vec<Line> = Vec::new();
+        header_lines.push(Line::from(Span::styled(
+            format!(
+                "Sources ({}) — [/]/[] switch · [a] add current Timeline",
+                self.comp_sources.len()
+            ),
+            Style::new()
+                .add_modifier(Modifier::BOLD)
+                .add_modifier(Modifier::DIM),
+        )));
+        for (i, s) in self.comp_sources.iter().enumerate() {
+            let marker = if i == self.comp_active { "▶ " } else { "  " };
+            let style = if i == self.comp_active {
+                Style::new().add_modifier(Modifier::BOLD)
+            } else {
+                Style::new()
+            };
+            let label = format!(
+                "{marker}{} ({} words)",
+                truncate(&s.display_name, 36),
+                s.words.len()
+            );
+            header_lines.push(Line::from(Span::styled(label, style)));
+        }
+        frame.render_widget(
+            Paragraph::new(header_lines).wrap(Wrap { trim: true }),
+            header_area,
+        );
+
+        // Active-source word window.
+        if let Some(source) = self.comp_source() {
+            let total = source.words.len();
+            let half = (body_area.width as usize / 5).max(8);
+            let start = source.cursor.saturating_sub(half as u32) as usize;
+            let end = (source.cursor as usize + half).min(total);
+            let mut spans: Vec<Span<'_>> = Vec::new();
+            for i in start..end {
+                let style = if i as u32 == source.cursor {
+                    Style::new()
+                        .add_modifier(Modifier::REVERSED)
+                        .add_modifier(Modifier::BOLD)
+                } else if Some(i as u32) == source.pending_in {
+                    Style::new().add_modifier(Modifier::UNDERLINED)
+                } else {
+                    Style::new()
+                };
+                spans.push(Span::styled(source.words[i].0.clone(), style));
+                spans.push(Span::raw(" "));
+            }
+            let header = Line::from(Span::styled(
+                format!(
+                    "{} · word {}/{}",
+                    truncate(&source.display_name, 32),
+                    source.cursor as usize + 1,
+                    total.max(1)
+                ),
+                Style::new().add_modifier(Modifier::DIM),
+            ));
+            frame.render_widget(
+                Paragraph::new(vec![header, Line::raw(""), Line::from(spans)])
+                    .wrap(Wrap { trim: false }),
+                body_area,
+            );
+        }
+
+        // Cross-source clip list.
+        let mut clip_lines: Vec<Line> = Vec::new();
+        clip_lines.push(Line::from(Span::styled(
+            format!("Compilation clips ({})", self.comp_clips.len()),
+            Style::new()
+                .add_modifier(Modifier::BOLD)
+                .add_modifier(Modifier::DIM),
+        )));
+        if self.comp_clips.is_empty() {
+            clip_lines.push(Line::from(Span::styled(
+                "  (none yet)".to_string(),
+                Style::new().add_modifier(Modifier::DIM),
+            )));
+        } else {
+            for (i, c) in self.comp_clips.iter().enumerate() {
+                let src_name = self
+                    .comp_sources
+                    .get(c.source_index)
+                    .map(|s| s.display_name.as_str())
+                    .unwrap_or("?");
+                clip_lines.push(Line::from(vec![
+                    Span::styled(
+                        format!(" {:>2}. ", i + 1),
+                        Style::new().add_modifier(Modifier::DIM),
+                    ),
+                    Span::styled(
+                        format!("[{}] ", truncate(src_name, 16)),
+                        Style::new().add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(c.label.clone(), Style::new()),
+                ]));
+            }
+        }
+        frame.render_widget(
+            Paragraph::new(clip_lines).wrap(Wrap { trim: true }),
+            clip_area,
+        );
+    }
+
     fn render_timeline(&self, frame: &mut Frame, area: Rect) {
         if self.words.is_empty() {
             let msg = if self.recording_path.is_some() {
@@ -587,6 +973,14 @@ fn render_stub(frame: &mut Frame, area: Rect, title: &str, body: &str) {
         Line::from(Span::styled(body.to_string(), Style::new().add_modifier(Modifier::DIM))),
     ];
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+}
+
+fn truncate(s: &str, n: usize) -> String {
+    if s.chars().count() > n {
+        s.chars().take(n.saturating_sub(1)).collect::<String>() + "…"
+    } else {
+        s.to_string()
+    }
 }
 
 /// Pull word-level timings from Crunchr's segments table. Returns the
