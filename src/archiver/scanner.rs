@@ -7,6 +7,7 @@ use super::types::VideoEntry;
 
 /// Filter applied to a scanned video catalog before submitting batches.
 /// All fields are optional; "no filter" matches everything. (R1.)
+#[allow(dead_code)] // consumed by the Catalog view (R1 phase 2 render)
 #[derive(Debug, Clone, Default)]
 pub struct CatalogFilter {
     /// Title regex (case-insensitive). Compiled lazily — bad regexes
@@ -25,6 +26,7 @@ pub struct CatalogFilter {
 }
 
 impl CatalogFilter {
+    #[allow(dead_code)] // consumed by the Catalog view (R1 phase 2 render)
     pub fn matches(&self, entry: &VideoEntry) -> bool {
         if let Some(rx) = &self.title_regex {
             // Use case-insensitive substring match instead of pulling in
@@ -75,6 +77,7 @@ impl CatalogFilter {
 /// Apply a [`CatalogFilter`] over a scanned catalog and optionally cap
 /// the result at `max`. Newest-first by upload date when both
 /// `upload_date` fields are present.
+#[allow(dead_code)] // consumed by the Catalog view (R1 phase 2 render)
 pub fn filter_and_cap(
     entries: &[VideoEntry],
     filter: &CatalogFilter,

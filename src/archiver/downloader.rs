@@ -3,6 +3,17 @@ use std::process::Stdio;
 
 use anyhow::Result;
 
+/// Options passed to the yt-dlp invocation. Centralizes the rate-limit
+/// + per-job knobs so the call site doesn't grow another positional
+/// argument per option.
+#[derive(Debug, Clone, Default)]
+pub struct DownloadOpts<'a> {
+    /// yt-dlp `--limit-rate` value (e.g., "5M"). When empty, no limit.
+    pub rate_limit: &'a str,
+    /// Max retries for this video. yt-dlp's `--retries`.
+    pub retries: u32,
+}
+
 /// Download a single video using yt-dlp with archive tracking.
 pub async fn download_video(
     video_url: &str,
@@ -12,6 +23,33 @@ pub async fn download_video(
     concurrent_fragments: u32,
     cookies_path: Option<&Path>,
     playlist_name: Option<&str>,
+) -> Result<()> {
+    download_video_with_opts(
+        video_url,
+        output_dir,
+        archive_txt,
+        format,
+        concurrent_fragments,
+        cookies_path,
+        playlist_name,
+        DownloadOpts::default(),
+    )
+    .await
+}
+
+/// Same as [`download_video`] but with extra knobs threaded through to
+/// yt-dlp. The legacy signature wraps this with `DownloadOpts::default()`
+/// to keep existing call sites unchanged. (R2.)
+#[allow(clippy::too_many_arguments)]
+pub async fn download_video_with_opts(
+    video_url: &str,
+    output_dir: &Path,
+    archive_txt: &Path,
+    format: &str,
+    concurrent_fragments: u32,
+    cookies_path: Option<&Path>,
+    playlist_name: Option<&str>,
+    opts: DownloadOpts<'_>,
 ) -> Result<()> {
     std::fs::create_dir_all(output_dir)?;
 
@@ -43,6 +81,14 @@ pub async fn download_video(
 
     if let Some(cookies) = cookies_path {
         cmd.args(["--cookies", cookies.to_str().unwrap_or("")]);
+    }
+
+    if !opts.rate_limit.is_empty() {
+        cmd.args(["--limit-rate", opts.rate_limit]);
+    }
+    if opts.retries > 0 {
+        let r = opts.retries.to_string();
+        cmd.args(["--retries", &r]);
     }
 
     cmd.arg(video_url);
