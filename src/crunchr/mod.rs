@@ -22,13 +22,105 @@ use strivo_core::app::{AppState, DaemonEvent};
 use strivo_core::config::{CrunchrAnalysisConfig, CrunchrConfig};
 use strivo_core::recording::job::RecordingState;
 
+use strivo_core::pipeline::{
+    Pipeline as HostPipeline, Stage as HostStage, StageKind as HostStageKind,
+};
 use strivo_core::plugin::{
-    DaemonEventKind, PaneId, Plugin, PluginAction, PluginCommand, PluginContext,
+    DaemonEventKind, PaneId, PipelineStageUpdate, Plugin, PluginAction, PluginCommand,
+    PluginContext,
 };
 use types::{
-    AnalysisData, ConfigModalState, CrunchrView, PickerState, PipelineEvent, PipelineState,
-    ProcessingJob, RecordingFilter, SearchResult, SpeakerModalState, SpeakerRow,
+    AnalysisData, ConfigModalState, CrunchrStageIds, CrunchrView, PickerState, PipelineEvent,
+    PipelineState, ProcessingJob, RecordingFilter, SearchResult, SpeakerModalState, SpeakerRow,
 };
+
+/// Build the host-side Pipeline that mirrors one Crunchr job. (C1 phase 2.)
+fn build_host_pipeline(
+    recording_id: Uuid,
+    channel: &str,
+    title: &str,
+    analyze: bool,
+) -> (HostPipeline, CrunchrStageIds) {
+    let label = format!(
+        "crunchr:{} · {}",
+        channel,
+        title.chars().take(40).collect::<String>()
+    );
+    let mut p = HostPipeline::new(label);
+    let extract = p.add_stage(HostStage::new("extract", HostStageKind::Extract));
+    let transcribe = p.add_stage(
+        HostStage::new(
+            "transcribe",
+            HostStageKind::Transcribe {
+                provider: "configured".into(),
+            },
+        )
+        .with_inputs(vec![extract]),
+    );
+    let subtitle = p.add_stage(
+        HostStage::new("subtitle", HostStageKind::Subtitle).with_inputs(vec![transcribe]),
+    );
+    let analyze_id = if analyze {
+        Some(p.add_stage(
+            HostStage::new(
+                "analyze",
+                HostStageKind::Analyze {
+                    provider: "openrouter".into(),
+                },
+            )
+            .with_inputs(vec![transcribe]),
+        ))
+    } else {
+        None
+    };
+    let _ = recording_id; // recording_id carried in label only; ids are uuids
+    (
+        p,
+        CrunchrStageIds {
+            extract,
+            transcribe,
+            subtitle,
+            analyze: analyze_id,
+        },
+    )
+}
+
+/// Translate a PipelineState transition into the host stage update
+/// the registry expects. Returns the (stage_id, update) tuple to emit,
+/// or None when no mirror is needed (e.g. Pending entry doesn't move
+/// any host stage). (C1 phase 2.)
+fn host_stage_for_transition(
+    ids: &CrunchrStageIds,
+    new_state: PipelineState,
+    error: Option<String>,
+) -> Vec<(uuid::Uuid, PipelineStageUpdate)> {
+    use PipelineState as P;
+    match new_state {
+        P::Pending => Vec::new(),
+        // Transitioning *into* Transcribing means Extract is done.
+        P::Transcribing => vec![(ids.extract, PipelineStageUpdate::Done)],
+        // Transitioning into Chunking means Transcribe + Subtitle
+        // both finalized (Subtitle is synthesized from the same data
+        // in the existing pipeline).
+        P::Chunking => vec![
+            (ids.transcribe, PipelineStageUpdate::Done),
+            (ids.subtitle, PipelineStageUpdate::Done),
+        ],
+        P::Analyzing => Vec::new(), // analyze stage already running
+        P::Complete => ids
+            .analyze
+            .map(|a| vec![(a, PipelineStageUpdate::Done)])
+            .unwrap_or_default(),
+        P::Failed => {
+            let err = error.unwrap_or_else(|| "unknown failure".to_string());
+            // We don't know which stage failed — surface against
+            // transcribe (the most common failure point); future
+            // commit can carry the exact stage in the error path.
+            vec![(ids.transcribe, PipelineStageUpdate::Failed(err))]
+        }
+        P::ExtractingAudio => Vec::new(),
+    }
+}
 
 pub const PANE_ID: PaneId = "crunchr";
 
@@ -472,6 +564,17 @@ impl CrunchrPlugin {
             }
         }
 
+        // C1 phase 2 — register a host Pipeline mirror so the DAG
+        // overlay + retry/skip/cancel verbs see this job.
+        let (host_pipeline, host_stages) = build_host_pipeline(
+            recording_id,
+            &channel_name,
+            &title,
+            self.config_draft
+                .as_ref()
+                .map(|c| c.analysis.enabled)
+                .unwrap_or(false),
+        );
         let job = ProcessingJob {
             recording_id,
             channel_name,
@@ -480,10 +583,13 @@ impl CrunchrPlugin {
             audio_path: None,
             state: PipelineState::Pending,
             error: None,
+            host_stages: Some(host_stages),
         };
         self.queue.push(job);
 
-        self.start_next_stage(recording_id)
+        let mut actions = vec![PluginAction::SubmitPipeline(host_pipeline)];
+        actions.extend(self.start_next_stage(recording_id));
+        actions
     }
 
     fn start_next_stage(&mut self, recording_id: Uuid) -> Vec<PluginAction> {
@@ -1565,16 +1671,29 @@ impl CrunchrPlugin {
                 if let Some(conn) = self.db.as_ref() {
                     let _ = db::update_video_status(conn, &rec_id_str, "complete", None);
                 }
+                let mut emit: Vec<PluginAction> = Vec::new();
                 if let Some(job) = self
                     .queue
                     .iter_mut()
                     .find(|j| j.recording_id == recording_id)
                 {
                     job.state = PipelineState::Complete;
+                    if let Some(ids) = job.host_stages.clone() {
+                        for (sid, upd) in host_stage_for_transition(
+                            &ids,
+                            PipelineState::Complete,
+                            None,
+                        ) {
+                            emit.push(PluginAction::UpdateStage {
+                                stage_id: sid,
+                                new_state: upd,
+                            });
+                        }
+                    }
                 }
                 self.in_flight.remove(&recording_id);
                 self.refresh_word_frequencies();
-                Vec::new()
+                emit
             }
             PipelineEvent::AnalysisComplete {
                 recording_id,
@@ -1607,21 +1726,35 @@ impl CrunchrPlugin {
                     let _ =
                         db::update_video_status(conn, &recording_id.to_string(), "complete", None);
                 }
+                let mut emit: Vec<PluginAction> = Vec::new();
                 if let Some(job) = self
                     .queue
                     .iter_mut()
                     .find(|j| j.recording_id == recording_id)
                 {
                     job.state = PipelineState::Complete;
+                    if let Some(ids) = job.host_stages.clone() {
+                        for (sid, upd) in host_stage_for_transition(
+                            &ids,
+                            PipelineState::Complete,
+                            None,
+                        ) {
+                            emit.push(PluginAction::UpdateStage {
+                                stage_id: sid,
+                                new_state: upd,
+                            });
+                        }
+                    }
                 }
                 self.in_flight.remove(&recording_id);
                 self.refresh_word_frequencies();
-                Vec::new()
+                emit
             }
             PipelineEvent::StageError {
                 recording_id,
                 error,
             } => {
+                let mut emit: Vec<PluginAction> = Vec::new();
                 if let Some(job) = self
                     .queue
                     .iter_mut()
@@ -1629,6 +1762,18 @@ impl CrunchrPlugin {
                 {
                     job.state = PipelineState::Failed;
                     job.error = Some(error.clone());
+                    if let Some(ids) = job.host_stages.clone() {
+                        for (sid, upd) in host_stage_for_transition(
+                            &ids,
+                            PipelineState::Failed,
+                            Some(error.clone()),
+                        ) {
+                            emit.push(PluginAction::UpdateStage {
+                                stage_id: sid,
+                                new_state: upd,
+                            });
+                        }
+                    }
                 }
                 if let Some(conn) = self.db.as_ref() {
                     let _ = db::update_video_status(
@@ -1640,7 +1785,8 @@ impl CrunchrPlugin {
                 }
                 self.in_flight.remove(&recording_id);
                 self.last_error = Some(error.clone());
-                vec![PluginAction::SetStatus(format!("CrunchR error: {error}"))]
+                emit.push(PluginAction::SetStatus(format!("CrunchR error: {error}")));
+                emit
             }
             PipelineEvent::ClipExportComplete { path, error } => match error {
                 None => {

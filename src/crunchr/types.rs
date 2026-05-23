@@ -160,6 +160,20 @@ pub struct ProcessingJob {
     pub audio_path: Option<PathBuf>,
     pub state: PipelineState,
     pub error: Option<String>,
+    /// Host DAG mirror — IDs of the four stages we register against
+    /// the host PipelineRegistry when the job is enqueued. None when
+    /// the host registry rejected our submission (logged + warned).
+    /// (C1 phase 2.)
+    pub host_stages: Option<CrunchrStageIds>,
+}
+
+/// Stable IDs into the host pipeline for one Crunchr job. (C1 phase 2.)
+#[derive(Debug, Clone)]
+pub struct CrunchrStageIds {
+    pub extract: uuid::Uuid,
+    pub transcribe: uuid::Uuid,
+    pub subtitle: uuid::Uuid,
+    pub analyze: Option<uuid::Uuid>,
 }
 
 /// Search backend selector. Semantic search (fastembed-rs + sqlite-vss)
