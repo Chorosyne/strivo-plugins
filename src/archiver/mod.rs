@@ -815,12 +815,22 @@ impl Plugin for ArchiverPlugin {
     }
 
     fn commands(&self) -> Vec<PluginCommand> {
-        vec![PluginCommand {
-            name: "Archiver",
-            description: "Channel archiver",
-            key: KeyCode::Char('A'),
-            modifiers: KeyModifiers::SHIFT,
-        }]
+        vec![
+            PluginCommand {
+                name: "Archiver",
+                description: "Channel archiver",
+                key: KeyCode::Char('A'),
+                modifiers: KeyModifiers::SHIFT,
+                scope: strivo_core::plugin::PluginCommandScope::Global,
+            },
+            // D5+X5 — item-scoped verb visible in the recording-list
+            // actions popup.
+            PluginCommand::item(
+                "Re-archive channel",
+                "rescan + redownload undownloaded VODs for this recording's channel",
+                strivo_core::plugin::ItemKind::Recording,
+            ),
+        ]
     }
 
     fn panes(&self) -> Vec<PaneId> {

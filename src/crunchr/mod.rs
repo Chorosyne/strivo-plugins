@@ -1831,12 +1831,27 @@ impl Plugin for CrunchrPlugin {
     }
 
     fn commands(&self) -> Vec<PluginCommand> {
-        vec![PluginCommand {
-            name: "Intelligence",
-            description: "CrunchR transcript search",
-            key: KeyCode::Char('I'),
-            modifiers: KeyModifiers::SHIFT,
-        }]
+        vec![
+            PluginCommand {
+                name: "Intelligence",
+                description: "CrunchR transcript search",
+                key: KeyCode::Char('I'),
+                modifiers: KeyModifiers::SHIFT,
+                scope: strivo_core::plugin::PluginCommandScope::Global,
+            },
+            // D5+X5 — item-scoped verbs visible in the recording-list
+            // actions popup.
+            PluginCommand::item(
+                "Re-transcribe",
+                "queue this recording through the active Crunchr preset",
+                strivo_core::plugin::ItemKind::Recording,
+            ),
+            PluginCommand::item(
+                "Show transcript",
+                "open the transcript search filtered to this recording",
+                strivo_core::plugin::ItemKind::Recording,
+            ),
+        ]
     }
 
     fn panes(&self) -> Vec<PaneId> {
