@@ -656,11 +656,31 @@ impl Plugin for ArchiverPlugin {
         Some(vec![
             DaemonEventKind::ChannelsUpdated,
             DaemonEventKind::RecordingFinished,
+            // R3: subscribe to schedule firings so a scheduled archive
+            // can run independent of recordings. Today the handler logs
+            // and no-ops because per-channel archive cron isn't a
+            // separate config concept yet; once it lands this filter is
+            // ready to receive without another plugin-trait change.
+            DaemonEventKind::ScheduleFired,
         ])
     }
 
     fn on_event(&mut self, event: &DaemonEvent, app: &AppState) -> Vec<PluginAction> {
         match event {
+            DaemonEvent::ScheduleFired {
+                channel, platform, ..
+            } => {
+                // R3 stub: log the firing so users can see the path is
+                // wired. A future config knob `[archiver.schedules]` will
+                // map (channel, platform) → an archive cron; on match,
+                // this handler will spawn a scan + download.
+                tracing::info!(
+                    plugin = "archiver",
+                    channel = %channel,
+                    platform = ?platform,
+                    "ScheduleFired observed (no archive-cron config yet)",
+                );
+            }
             DaemonEvent::ChannelsUpdated(channels) => {
                 self.channels = channels.clone();
             }
