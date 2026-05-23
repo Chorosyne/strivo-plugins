@@ -5,6 +5,7 @@ mod pipeline;
 pub mod render;
 pub mod transcribe;
 pub mod types;
+pub mod voice_samples;
 
 use std::any::Any;
 use std::collections::HashSet;
@@ -24,8 +25,8 @@ use strivo_core::plugin::{
     DaemonEventKind, PaneId, Plugin, PluginAction, PluginCommand, PluginContext,
 };
 use types::{
-    AnalysisData, ConfigModalState, CrunchrView, PipelineEvent, PipelineState,
-    PickerState, ProcessingJob, RecordingFilter, SearchResult,
+    AnalysisData, ConfigModalState, CrunchrView, PickerState, PipelineEvent, PipelineState,
+    ProcessingJob, RecordingFilter, SearchResult, SpeakerModalState, SpeakerRow,
 };
 
 pub const PANE_ID: PaneId = "crunchr";
@@ -69,7 +70,10 @@ fn disambiguate(target: &std::path::Path) -> PathBuf {
         return target.to_path_buf();
     }
     let parent = target.parent().unwrap_or_else(|| std::path::Path::new("."));
-    let stem = target.file_stem().and_then(|s| s.to_str()).unwrap_or("clip");
+    let stem = target
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("clip");
     let ext = target.extension().and_then(|s| s.to_str()).unwrap_or("mkv");
     for n in 1..=999u32 {
         let candidate = parent.join(format!("{stem}_{n}.{ext}"));
@@ -159,6 +163,8 @@ pub struct CrunchrPlugin {
     pub config_modal: ConfigModalState,
     /// Draft config being edited in the modal.
     pub config_draft: Option<CrunchrConfig>,
+    /// Speaker Editor modal state.
+    pub speaker_modal: SpeakerModalState,
     /// Current view mode.
     pub view: CrunchrView,
     /// Recording picker state.
@@ -172,6 +178,16 @@ pub struct CrunchrPlugin {
     diarize_override_jobs: HashSet<Uuid>,
     /// Lazily-initialized voxtral-api backend used as the diarization fallback.
     diarize_backend: Option<Arc<dyn transcribe::TranscriptionBackend>>,
+    /// Env var to read the Mistral API key from (cached from `CrunchrConfig.api_key_env`
+    /// at init time). Falls back to `MISTRAL_API_KEY`. Only consulted when initializing
+    /// the diarization fallback backend.
+    diarize_api_key_env: Option<String>,
+    /// Mirror of `CrunchrConfig.embed_subs` cached at init so the
+    /// TranscriptionComplete handler can decide whether to call mkvmerge.
+    embed_subs: bool,
+    /// Mirror of `CrunchrConfig.diarize` cached at init. Surfaced in the UI
+    /// (Speaker Editor availability + no-backend hint).
+    diarize_requested: bool,
 }
 
 impl Default for CrunchrPlugin {
@@ -206,18 +222,25 @@ impl CrunchrPlugin {
             tandem_playlists: Vec::new(),
             config_modal: ConfigModalState::Hidden,
             config_draft: None,
+            speaker_modal: SpeakerModalState::Hidden,
             view: CrunchrView::Search,
             picker: PickerState::default(),
             cached_channels: Vec::new(),
             diarize_override_jobs: HashSet::new(),
             diarize_backend: None,
+            diarize_api_key_env: None,
+            embed_subs: true,
+            diarize_requested: false,
         }
     }
 
     /// If `recording_id` should transcribe with the diarization fallback,
     /// return a clone of that backend; otherwise None. Caller falls back to
     /// `self.backend` when this returns None.
-    fn pick_backend_for(&self, recording_id: Uuid) -> Option<Arc<dyn transcribe::TranscriptionBackend>> {
+    fn pick_backend_for(
+        &self,
+        recording_id: Uuid,
+    ) -> Option<Arc<dyn transcribe::TranscriptionBackend>> {
         if self.diarize_override_jobs.contains(&recording_id) {
             self.diarize_backend.clone()
         } else {
@@ -232,11 +255,18 @@ impl CrunchrPlugin {
         if self.diarize_backend.is_some() {
             return true;
         }
-        let api_key = std::env::var("MISTRAL_API_KEY").ok();
-        match api_key {
+        let var = self
+            .diarize_api_key_env
+            .as_deref()
+            .unwrap_or("MISTRAL_API_KEY");
+        match std::env::var(var).ok() {
             Some(key) if !key.is_empty() => {
-                self.diarize_backend = Some(Arc::new(transcribe::voxtral_api::VoxtralApiBackend::new(key)));
-                tracing::info!("crunchr: initialized voxtral-api fallback for diarization");
+                self.diarize_backend = Some(Arc::new(
+                    transcribe::voxtral_api::VoxtralApiBackend::new(key),
+                ));
+                tracing::info!(
+                    "crunchr: initialized voxtral-api fallback for diarization (env: {var})"
+                );
                 true
             }
             _ => false,
@@ -273,11 +303,17 @@ impl CrunchrPlugin {
         self.selected_analysis = None;
         self.selected_speaker = None;
 
-        let Some(result) = self.search_results.get(self.selected_result) else { return };
+        let Some(result) = self.search_results.get(self.selected_result) else {
+            return;
+        };
         let Some(conn) = self.db.as_ref() else { return };
 
-        self.selected_analysis = db::get_analysis_for_chunk(conn, result.chunk_id).ok().flatten();
-        self.selected_speaker = db::get_speaker_for_chunk(conn, result.chunk_id).ok().flatten();
+        self.selected_analysis = db::get_analysis_for_chunk(conn, result.chunk_id)
+            .ok()
+            .flatten();
+        self.selected_speaker = db::get_speaker_for_chunk(conn, result.chunk_id)
+            .ok()
+            .flatten();
         self.prev_selected = self.selected_result;
     }
 
@@ -294,47 +330,61 @@ impl CrunchrPlugin {
         let conn = self.db.as_ref()?;
 
         // Get video status
-        let status: Option<String> = conn.query_row(
-            "SELECT status FROM videos WHERE recording_id = ?1",
-            [recording_id],
-            |row| row.get(0),
-        ).ok();
+        let status: Option<String> = conn
+            .query_row(
+                "SELECT status FROM videos WHERE recording_id = ?1",
+                [recording_id],
+                |row| row.get(0),
+            )
+            .ok();
 
         let status = status?;
 
         // Get video ID for further queries
-        let video_id: Option<i64> = conn.query_row(
-            "SELECT id FROM videos WHERE recording_id = ?1",
-            [recording_id],
-            |row| row.get(0),
-        ).ok();
+        let video_id: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM videos WHERE recording_id = ?1",
+                [recording_id],
+                |row| row.get(0),
+            )
+            .ok();
 
         let video_id = video_id?;
 
         // Count segments
-        let segment_count: usize = conn.query_row(
-            "SELECT COUNT(*) FROM segments WHERE video_id = ?1",
-            [video_id],
-            |row| row.get::<_, i64>(0),
-        ).ok().unwrap_or(0) as usize;
+        let segment_count: usize = conn
+            .query_row(
+                "SELECT COUNT(*) FROM segments WHERE video_id = ?1",
+                [video_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .ok()
+            .unwrap_or(0) as usize;
 
         // Count words (sum of word frequencies)
-        let word_count: usize = conn.query_row(
-            "SELECT COALESCE(SUM(count), 0) FROM word_frequency WHERE video_id = ?1",
-            [video_id],
-            |row| row.get::<_, i64>(0),
-        ).ok().unwrap_or(0) as usize;
+        let word_count: usize = conn
+            .query_row(
+                "SELECT COALESCE(SUM(count), 0) FROM word_frequency WHERE video_id = ?1",
+                [video_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .ok()
+            .unwrap_or(0) as usize;
 
         // Get analysis data
-        let analysis: Option<(String, String, String)> = conn.query_row(
-            "SELECT summary, topics, sentiment FROM video_analysis WHERE video_id = ?1",
-            [video_id],
-            |row| Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            )),
-        ).ok();
+        let analysis: Option<(String, String, String)> = conn
+            .query_row(
+                "SELECT summary, topics, sentiment FROM video_analysis WHERE video_id = ?1",
+                [video_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .ok();
 
         let (has_analysis, summary, topics, sentiment) = if let Some((s, t, sent)) = analysis {
             let topic_list: Vec<String> = serde_json::from_str(&t).unwrap_or_default();
@@ -368,7 +418,13 @@ impl CrunchrPlugin {
         })
     }
 
-    fn queue_recording(&mut self, recording_id: Uuid, channel_name: String, title: String, video_path: PathBuf) -> Vec<PluginAction> {
+    fn queue_recording(
+        &mut self,
+        recording_id: Uuid,
+        channel_name: String,
+        title: String,
+        video_path: PathBuf,
+    ) -> Vec<PluginAction> {
         if self.in_flight.contains(&recording_id) {
             return Vec::new();
         }
@@ -386,8 +442,11 @@ impl CrunchrPlugin {
             .parent()
             .map(|p| p.join(".crunchr-auto").exists())
             .unwrap_or(false);
-        let backend_supports_diarize = self.backend.as_ref()
-            .map(|b| b.supports_diarization()).unwrap_or(false);
+        let backend_supports_diarize = self
+            .backend
+            .as_ref()
+            .map(|b| b.supports_diarization())
+            .unwrap_or(false);
         if auto_marker && !backend_supports_diarize {
             if self.try_init_diarize_backend() {
                 self.diarize_override_jobs.insert(recording_id);
@@ -427,7 +486,11 @@ impl CrunchrPlugin {
     }
 
     fn start_next_stage(&mut self, recording_id: Uuid) -> Vec<PluginAction> {
-        let Some(job_idx) = self.queue.iter().position(|j| j.recording_id == recording_id) else {
+        let Some(job_idx) = self
+            .queue
+            .iter()
+            .position(|j| j.recording_id == recording_id)
+        else {
             return Vec::new();
         };
 
@@ -438,25 +501,42 @@ impl CrunchrPlugin {
                 let video_path = self.queue[job_idx].video_path.clone();
                 self.queue[job_idx].state = PipelineState::ExtractingAudio;
                 if let Some(conn) = self.db.as_ref() {
-                    let _ = db::update_video_status(conn, &recording_id.to_string(), "extracting_audio", None);
+                    let _ = db::update_video_status(
+                        conn,
+                        &recording_id.to_string(),
+                        "extracting_audio",
+                        None,
+                    );
                 }
                 let output_dir = self.data_dir.join("audio");
                 vec![PluginAction::SpawnTask {
                     plugin_name: "crunchr",
-                    future: Box::pin(pipeline::extract_audio(recording_id, video_path, output_dir)),
+                    future: Box::pin(pipeline::extract_audio(
+                        recording_id,
+                        video_path,
+                        output_dir,
+                    )),
                 }]
             }
             PipelineState::ExtractingAudio => {
                 if !self.backend_available {
                     self.queue[job_idx].state = PipelineState::Failed;
-                    self.queue[job_idx].error = Some("No transcription backend available".to_string());
+                    self.queue[job_idx].error =
+                        Some("No transcription backend available".to_string());
                     self.in_flight.remove(&recording_id);
-                    return vec![PluginAction::SetStatus("CrunchR: no transcription backend".to_string())];
+                    return vec![PluginAction::SetStatus(
+                        "CrunchR: no transcription backend".to_string(),
+                    )];
                 }
                 let audio_path = self.queue[job_idx].audio_path.clone().unwrap_or_default();
                 self.queue[job_idx].state = PipelineState::Transcribing;
                 if let Some(conn) = self.db.as_ref() {
-                    let _ = db::update_video_status(conn, &recording_id.to_string(), "transcribing", None);
+                    let _ = db::update_video_status(
+                        conn,
+                        &recording_id.to_string(),
+                        "transcribing",
+                        None,
+                    );
                 }
                 // Per-job backend override (used when a catalog-pull job needs
                 // diarization but the configured backend can't provide it).
@@ -480,7 +560,8 @@ impl CrunchrPlugin {
                                         recording_id,
                                         segments: result.segments,
                                         full_text: result.full_text,
-                                    }) as Box<dyn Any + Send>;
+                                    })
+                                        as Box<dyn Any + Send>;
                                 }
                                 Err(e) => {
                                     let msg = format!("{e}");
@@ -492,10 +573,8 @@ impl CrunchrPlugin {
                                     );
                                     last_err = Some(msg);
                                     if attempt + 1 < BACKOFFS_SECS.len() {
-                                        tokio::time::sleep(
-                                            std::time::Duration::from_secs(*secs),
-                                        )
-                                        .await;
+                                        tokio::time::sleep(std::time::Duration::from_secs(*secs))
+                                            .await;
                                     }
                                 }
                             }
@@ -513,14 +592,15 @@ impl CrunchrPlugin {
             PipelineState::Transcribing => {
                 self.queue[job_idx].state = PipelineState::Chunking;
                 if let Some(conn) = self.db.as_ref() {
-                    let _ = db::update_video_status(conn, &recording_id.to_string(), "chunking", None);
+                    let _ =
+                        db::update_video_status(conn, &recording_id.to_string(), "chunking", None);
                 }
 
                 // Read segments from DB (fast sync), then spawn CPU-intensive chunking as async task
                 let rec_id_str = recording_id.to_string();
                 let conn = self.db.as_ref();
-                let video_id = conn
-                    .and_then(|c| db::get_video_id_by_recording(c, &rec_id_str).ok().flatten());
+                let video_id =
+                    conn.and_then(|c| db::get_video_id_by_recording(c, &rec_id_str).ok().flatten());
                 let segments = video_id
                     .and_then(|vid| conn.and_then(|c| db::get_segments_for_video(c, vid).ok()));
 
@@ -544,16 +624,24 @@ impl CrunchrPlugin {
                             // CPU-intensive work in spawn_blocking
                             let result = tokio::task::spawn_blocking(move || {
                                 let chunks = pipeline::chunk_segments(&seg_structs, 512);
-                                let all_text: String = chunks.iter().map(|c| c.text.as_str()).collect::<Vec<_>>().join(" ");
+                                let all_text: String = chunks
+                                    .iter()
+                                    .map(|c| c.text.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(" ");
                                 let freqs = pipeline::word_frequencies(&all_text);
-                                let chunk_data: Vec<types::ChunkData> = chunks.into_iter().map(|c| types::ChunkData {
-                                    text: c.text,
-                                    start_sec: c.start_sec,
-                                    end_sec: c.end_sec,
-                                    token_count: c.token_count,
-                                }).collect();
+                                let chunk_data: Vec<types::ChunkData> = chunks
+                                    .into_iter()
+                                    .map(|c| types::ChunkData {
+                                        text: c.text,
+                                        start_sec: c.start_sec,
+                                        end_sec: c.end_sec,
+                                        token_count: c.token_count,
+                                    })
+                                    .collect();
                                 (chunk_data, freqs)
-                            }).await;
+                            })
+                            .await;
 
                             match result {
                                 Ok((chunks, word_frequencies)) => {
@@ -564,17 +652,19 @@ impl CrunchrPlugin {
                                         word_frequencies,
                                     }) as Box<dyn Any + Send>
                                 }
-                                Err(e) => {
-                                    Box::new(PipelineEvent::StageError {
-                                        recording_id,
-                                        error: format!("Chunking failed: {e}"),
-                                    }) as Box<dyn Any + Send>
-                                }
+                                Err(e) => Box::new(PipelineEvent::StageError {
+                                    recording_id,
+                                    error: format!("Chunking failed: {e}"),
+                                }) as Box<dyn Any + Send>,
                             }
                         }),
                     }]
                 } else {
-                    if let Some(job) = self.queue.iter_mut().find(|j| j.recording_id == recording_id) {
+                    if let Some(job) = self
+                        .queue
+                        .iter_mut()
+                        .find(|j| j.recording_id == recording_id)
+                    {
                         job.state = PipelineState::Failed;
                         job.error = Some("No segments found for chunking".to_string());
                     }
@@ -589,24 +679,30 @@ impl CrunchrPlugin {
     /// Open the config modal, cloning current config into draft.
     fn open_config_modal(&mut self, app: &AppState) {
         // Cache channels for the tandem checklist
-        self.cached_channels = app.channels.iter().map(|ch| {
-            let key = format!("{}:{}", ch.platform, ch.id);
-            let display = format!("[{}] {}", ch.platform, ch.display_name);
-            (key, display)
-        }).collect();
+        self.cached_channels = app
+            .channels
+            .iter()
+            .map(|ch| {
+                let key = format!("{}:{}", ch.platform, ch.id);
+                let display = format!("[{}] {}", ch.platform, ch.display_name);
+                (key, display)
+            })
+            .collect();
 
         // Clone current config into draft
         let mut draft = CrunchrConfig {
             enabled: self.enabled,
             configured: self.configured,
             backend: self.backend.as_ref().map_or_else(
-                || "whisper-cli".to_string(),
+                || "voxtral-openrouter".to_string(),
                 |b| b.backend_name().to_string(),
             ),
             api_key_env: None,
             endpoint: None,
             whisper_model: None,
             whisper_timeout_secs: 7200,
+            diarize: false,
+            embed_subs: true,
             analysis: CrunchrAnalysisConfig::default(),
             tandem_channels: self.tandem_channels.clone(),
             tandem_playlists: self.tandem_playlists.clone(),
@@ -626,7 +722,12 @@ impl CrunchrPlugin {
 
     /// Handle keys while config modal is active.
     fn handle_config_modal_key(&mut self, key: KeyEvent, _app: &AppState) -> Vec<PluginAction> {
-        let ConfigModalState::Active { ref mut selected_field, ref mut editing, static_field_count } = self.config_modal else {
+        let ConfigModalState::Active {
+            ref mut selected_field,
+            ref mut editing,
+            static_field_count,
+        } = self.config_modal
+        else {
             return Vec::new();
         };
         let total_fields = static_field_count + self.cached_channels.len();
@@ -638,14 +739,30 @@ impl CrunchrPlugin {
 
         if *editing {
             match key.code {
-                KeyCode::Esc => { *editing = false; }
-                KeyCode::Enter => { *editing = false; }
+                KeyCode::Esc => {
+                    *editing = false;
+                }
+                KeyCode::Enter => {
+                    *editing = false;
+                }
                 KeyCode::Backspace => {
                     if let Some(ref mut draft) = self.config_draft {
                         match *selected_field {
-                            2 => { if let Some(s) = draft.api_key_env.as_mut() { s.pop(); } }
-                            3 => { if let Some(s) = draft.endpoint.as_mut() { s.pop(); } }
-                            4 => { if let Some(s) = draft.whisper_model.as_mut() { s.pop(); } }
+                            2 => {
+                                if let Some(s) = draft.api_key_env.as_mut() {
+                                    s.pop();
+                                }
+                            }
+                            3 => {
+                                if let Some(s) = draft.endpoint.as_mut() {
+                                    s.pop();
+                                }
+                            }
+                            4 => {
+                                if let Some(s) = draft.whisper_model.as_mut() {
+                                    s.pop();
+                                }
+                            }
                             _ => {}
                         }
                     }
@@ -702,9 +819,11 @@ impl CrunchrPlugin {
                     // Cycle backend
                     if let Some(ref mut draft) = self.config_draft {
                         draft.backend = match draft.backend.as_str() {
-                            "whisper-cli" => "voxtral-api".to_string(),
-                            "voxtral-api" => "voxtral-local".to_string(),
-                            _ => "whisper-cli".to_string(),
+                            "voxtral-openrouter" => "voxtral-api".to_string(),
+                            "voxtral-api" => "whisperx-local".to_string(),
+                            "whisperx-local" => "voxtral-local".to_string(),
+                            "voxtral-local" => "whisper-cli".to_string(),
+                            _ => "voxtral-openrouter".to_string(),
                         };
                     }
                 } else if *selected_field == 5 {
@@ -740,25 +859,267 @@ impl CrunchrPlugin {
         Vec::new()
     }
 
-    /// Handle keys in the Search view (original behavior).
-    fn handle_search_key(&mut self, key: KeyEvent, app: &AppState) -> Vec<PluginAction> {
-        if self.input_active {
-            match key.code {
-                KeyCode::Esc => { self.input_active = false; }
-                KeyCode::Enter => {
-                    self.input_active = false;
-                    self.execute_search();
+    /// Open the Speaker Editor modal for the currently-focused search result.
+    /// No-op (with a status hint) when nothing usable is selected or when the
+    /// transcript has no speaker labels.
+    fn open_speaker_modal_for_selected(&mut self) -> Vec<PluginAction> {
+        let Some(result) = self.search_results.get(self.selected_result).cloned() else {
+            return vec![PluginAction::SetStatus(
+                "Speaker editor: no transcript selected".to_string(),
+            )];
+        };
+        let Some(video_path) = result.video_path.clone() else {
+            return vec![PluginAction::SetStatus(
+                "Speaker editor: selection has no recording path".to_string(),
+            )];
+        };
+        let Some(conn) = self.db.as_ref() else {
+            return vec![PluginAction::SetStatus(
+                "Speaker editor: database unavailable".to_string(),
+            )];
+        };
+
+        let Some((video_id, recording_id_str)) =
+            db::lookup_video_by_path(conn, &video_path).ok().flatten()
+        else {
+            return vec![PluginAction::SetStatus(
+                "Speaker editor: recording not found in CrunchR database".to_string(),
+            )];
+        };
+        let recording_id = match Uuid::parse_str(&recording_id_str) {
+            Ok(u) => u,
+            Err(_) => {
+                return vec![PluginAction::SetStatus(
+                    "Speaker editor: invalid recording id".to_string(),
+                )];
+            }
+        };
+        let speakers = match db::load_speakers(conn, video_id) {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!("crunchr: load_speakers failed: {e}");
+                return vec![PluginAction::SetStatus(
+                    "Speaker editor: failed to load speakers".to_string(),
+                )];
+            }
+        };
+        if speakers.is_empty() {
+            return vec![PluginAction::SetStatus(
+                "Speaker editor: this recording has no diarized speakers".to_string(),
+            )];
+        }
+
+        let samples_dir = self
+            .data_dir
+            .join("voice_samples")
+            .join(recording_id.to_string());
+
+        let rows: Vec<SpeakerRow> = speakers
+            .into_iter()
+            .map(|st| {
+                let slug = voice_samples::slugify(&st.speaker);
+                let path = samples_dir.join(format!("{slug}.wav"));
+                let sample = path.exists().then_some(path);
+                SpeakerRow {
+                    original_label: st.speaker.clone(),
+                    display_label: st.speaker,
+                    segment_count: st.segment_count,
+                    total_secs: st.total_secs,
+                    sample_path: sample,
                 }
-                KeyCode::Backspace => { self.search_query.pop(); }
-                KeyCode::Char(c) => { self.search_query.push(c); }
+            })
+            .collect();
+
+        self.speaker_modal = SpeakerModalState::Active {
+            recording_id,
+            video_id,
+            video_path: PathBuf::from(video_path),
+            rows,
+            selected_row: 0,
+            editing: false,
+        };
+        Vec::new()
+    }
+
+    /// Key dispatch for the Speaker Editor modal. Mirrors the shape of
+    /// `handle_config_modal_key` but with a flat row list rather than a
+    /// heterogeneous form.
+    fn handle_speaker_modal_key(&mut self, key: KeyEvent) -> Vec<PluginAction> {
+        // Pull the active fields out behind an early-return guard so we don't
+        // need to repeatedly match the enum in every arm.
+        let SpeakerModalState::Active {
+            ref mut rows,
+            ref mut selected_row,
+            ref mut editing,
+            video_id,
+            ref video_path,
+            ..
+        } = self.speaker_modal
+        else {
+            return Vec::new();
+        };
+
+        if *editing {
+            // Text-edit mode: only letters / digits / space / Backspace / Enter / Esc.
+            match key.code {
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if let Some(row) = rows.get_mut(*selected_row) {
+                        row.display_label.push(c);
+                    }
+                }
+                KeyCode::Backspace => {
+                    if let Some(row) = rows.get_mut(*selected_row) {
+                        row.display_label.pop();
+                    }
+                }
+                KeyCode::Enter => {
+                    *editing = false;
+                }
+                KeyCode::Esc => {
+                    // Revert the in-flight edit on the focused row.
+                    if let Some(row) = rows.get_mut(*selected_row) {
+                        row.display_label = row.original_label.clone();
+                    }
+                    *editing = false;
+                }
                 _ => {}
             }
             return Vec::new();
         }
 
         match key.code {
-            KeyCode::Char('/') => { self.input_active = true; }
-            KeyCode::Char('c') => { self.open_config_modal(app); }
+            KeyCode::Char('j') | KeyCode::Down => {
+                if !rows.is_empty() {
+                    *selected_row = (*selected_row + 1) % rows.len();
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if !rows.is_empty() {
+                    *selected_row = if *selected_row == 0 {
+                        rows.len() - 1
+                    } else {
+                        *selected_row - 1
+                    };
+                }
+            }
+            KeyCode::Enter => {
+                *editing = true;
+            }
+            KeyCode::Char(' ') => {
+                if let Some(row) = rows.get(*selected_row) {
+                    if let Some(ref sample) = row.sample_path {
+                        return vec![PluginAction::PlayFile(sample.clone())];
+                    }
+                    return vec![PluginAction::SetStatus(
+                        "Speaker editor: voice sample not yet sliced".to_string(),
+                    )];
+                }
+            }
+            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                return self.commit_speaker_modal(video_id, video_path.clone());
+            }
+            KeyCode::Esc => {
+                self.speaker_modal = SpeakerModalState::Hidden;
+            }
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    /// Commit rename edits from the Speaker Editor modal: write to DB,
+    /// regenerate sidecars from the persisted segments, optionally re-mux
+    /// subs into the .mkv.
+    fn commit_speaker_modal(&mut self, video_id: i64, video_path: PathBuf) -> Vec<PluginAction> {
+        let rows_snapshot: Vec<(String, String)> = match self.speaker_modal {
+            SpeakerModalState::Active { ref rows, .. } => rows
+                .iter()
+                .filter(|r| r.display_label != r.original_label)
+                .map(|r| (r.original_label.clone(), r.display_label.clone()))
+                .collect(),
+            _ => Vec::new(),
+        };
+
+        if rows_snapshot.is_empty() {
+            self.speaker_modal = SpeakerModalState::Hidden;
+            return vec![PluginAction::SetStatus(
+                "Speaker editor: nothing to save".to_string(),
+            )];
+        }
+
+        let conn = match self.db.as_ref() {
+            Some(c) => c,
+            None => {
+                self.speaker_modal = SpeakerModalState::Hidden;
+                return vec![PluginAction::SetStatus(
+                    "Speaker editor: database unavailable".to_string(),
+                )];
+            }
+        };
+
+        let mut updated_total = 0usize;
+        for (old, new) in &rows_snapshot {
+            match db::rewrite_speaker_label(conn, video_id, old, new) {
+                Ok(n) => updated_total += n,
+                Err(e) => {
+                    tracing::warn!(
+                        "crunchr: rewrite_speaker_label({old:?} -> {new:?}) failed: {e}"
+                    );
+                }
+            }
+        }
+
+        // Regenerate sidecars from the persisted (now-renamed) segments.
+        let segments = db::load_full_segments(conn, video_id).unwrap_or_default();
+        if let Some(ep_dir) = video_path.parent() {
+            let full_text = segments
+                .iter()
+                .map(|s| s.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            if let Err(e) = write_transcript_sidecars(ep_dir, &segments, &full_text) {
+                tracing::warn!("crunchr: sidecar rewrite failed: {e}");
+            }
+            if self.embed_subs {
+                mux_subs_into_mkv(&video_path, &ep_dir.join("transcript.vtt"));
+            }
+        }
+
+        self.speaker_modal = SpeakerModalState::Hidden;
+        vec![PluginAction::SetStatus(format!(
+            "Speaker labels updated ({} segments rewritten)",
+            updated_total
+        ))]
+    }
+
+    /// Handle keys in the Search view (original behavior).
+    fn handle_search_key(&mut self, key: KeyEvent, app: &AppState) -> Vec<PluginAction> {
+        if self.input_active {
+            match key.code {
+                KeyCode::Esc => {
+                    self.input_active = false;
+                }
+                KeyCode::Enter => {
+                    self.input_active = false;
+                    self.execute_search();
+                }
+                KeyCode::Backspace => {
+                    self.search_query.pop();
+                }
+                KeyCode::Char(c) => {
+                    self.search_query.push(c);
+                }
+                _ => {}
+            }
+            return Vec::new();
+        }
+
+        match key.code {
+            KeyCode::Char('/') => {
+                self.input_active = true;
+            }
+            KeyCode::Char('c') => {
+                self.open_config_modal(app);
+            }
             KeyCode::Tab => {
                 self.view = CrunchrView::Queue;
             }
@@ -810,10 +1171,9 @@ impl CrunchrPlugin {
                             future: Box::pin(async move {
                                 let res = export_clip(&source, start, end, &clips_dir, &stem).await;
                                 let event = match res {
-                                    Ok(path) => PipelineEvent::ClipExportComplete {
-                                        path,
-                                        error: None,
-                                    },
+                                    Ok(path) => {
+                                        PipelineEvent::ClipExportComplete { path, error: None }
+                                    }
                                     Err(e) => PipelineEvent::ClipExportComplete {
                                         path: clips_dir.join(format!("{stem}.mkv")),
                                         error: Some(e.to_string()),
@@ -836,8 +1196,12 @@ impl CrunchrPlugin {
     /// Handle keys in the Queue view.
     fn handle_queue_key(&mut self, key: KeyEvent) -> Vec<PluginAction> {
         match key.code {
-            KeyCode::Tab => { self.view = CrunchrView::RecordingPicker; }
-            KeyCode::Esc => { self.view = CrunchrView::Search; }
+            KeyCode::Tab => {
+                self.view = CrunchrView::RecordingPicker;
+            }
+            KeyCode::Esc => {
+                self.view = CrunchrView::Search;
+            }
             _ => {}
         }
         Vec::new()
@@ -849,10 +1213,13 @@ impl CrunchrPlugin {
         self.refresh_picker_list(app);
 
         match key.code {
-            KeyCode::Tab => { self.view = CrunchrView::Search; }
+            KeyCode::Tab => {
+                self.view = CrunchrView::Search;
+            }
             KeyCode::Char('j') | KeyCode::Down => {
                 if !self.picker.visible_ids.is_empty() {
-                    self.picker.selected = (self.picker.selected + 1) % self.picker.visible_ids.len();
+                    self.picker.selected =
+                        (self.picker.selected + 1) % self.picker.visible_ids.len();
                 }
             }
             KeyCode::Char('k') | KeyCode::Up => {
@@ -897,7 +1264,9 @@ impl CrunchrPlugin {
 
     /// Refresh the recording picker's visible list based on the current filter.
     fn refresh_picker_list(&mut self, app: &AppState) {
-        let finished: Vec<_> = app.recordings.values()
+        let finished: Vec<_> = app
+            .recordings
+            .values()
             .filter(|r| r.state == RecordingState::Finished)
             .filter(|r| !self.in_flight.contains(&r.id))
             .filter(|r| match &self.picker.filter {
@@ -906,9 +1275,7 @@ impl CrunchrPlugin {
                     let key = format!("{}:{}", r.platform, r.channel_id);
                     key == *ch
                 }
-                RecordingFilter::ByPlaylist(pl) => {
-                    r.playlist.as_deref() == Some(pl.as_str())
-                }
+                RecordingFilter::ByPlaylist(pl) => r.playlist.as_deref() == Some(pl.as_str()),
             })
             .collect();
 
@@ -923,11 +1290,16 @@ impl CrunchrPlugin {
         // Collect unique channels from finished recordings
         let channels: Vec<String> = {
             let mut seen = HashSet::new();
-            app.recordings.values()
+            app.recordings
+                .values()
                 .filter(|r| r.state == RecordingState::Finished)
                 .filter_map(|r| {
                     let key = format!("{}:{}", r.platform, r.channel_id);
-                    if seen.insert(key.clone()) { Some(key) } else { None }
+                    if seen.insert(key.clone()) {
+                        Some(key)
+                    } else {
+                        None
+                    }
                 })
                 .collect()
         };
@@ -957,7 +1329,12 @@ impl CrunchrPlugin {
     fn process_selected_recordings(&mut self, app: &AppState) -> Vec<PluginAction> {
         let ids: Vec<Uuid> = if self.picker.selections.is_empty() {
             // Process just the focused recording
-            self.picker.visible_ids.get(self.picker.selected).copied().into_iter().collect()
+            self.picker
+                .visible_ids
+                .get(self.picker.selected)
+                .copied()
+                .into_iter()
+                .collect()
         } else {
             self.picker.selections.drain().collect()
         };
@@ -968,7 +1345,9 @@ impl CrunchrPlugin {
                 let mut batch = self.queue_recording(
                     id,
                     rec.channel_name.clone(),
-                    rec.stream_title.clone().unwrap_or_else(|| "Untitled".to_string()),
+                    rec.stream_title
+                        .clone()
+                        .unwrap_or_else(|| "Untitled".to_string()),
                     rec.output_path.clone(),
                 );
                 actions.append(&mut batch);
@@ -982,8 +1361,15 @@ impl CrunchrPlugin {
 
     fn handle_pipeline_event(&mut self, event: PipelineEvent) -> Vec<PluginAction> {
         match event {
-            PipelineEvent::AudioExtracted { recording_id, audio_path } => {
-                if let Some(job) = self.queue.iter_mut().find(|j| j.recording_id == recording_id) {
+            PipelineEvent::AudioExtracted {
+                recording_id,
+                audio_path,
+            } => {
+                if let Some(job) = self
+                    .queue
+                    .iter_mut()
+                    .find(|j| j.recording_id == recording_id)
+                {
                     job.audio_path = Some(audio_path.clone());
                 }
                 if let Some(conn) = self.db.as_ref() {
@@ -995,23 +1381,30 @@ impl CrunchrPlugin {
                 }
                 self.start_next_stage(recording_id)
             }
-            PipelineEvent::TranscriptionComplete { recording_id, segments, full_text } => {
+            PipelineEvent::TranscriptionComplete {
+                recording_id,
+                segments,
+                full_text,
+            } => {
                 if let Some(conn) = self.db.as_ref() {
                     let rec_id_str = recording_id.to_string();
                     let _ = db::update_video_transcript(conn, &rec_id_str, &full_text);
 
                     if let Ok(Some(video_id)) = db::get_video_id_by_recording(conn, &rec_id_str) {
-                        let seg_data: Vec<(usize, f64, f64, &str, Option<&str>, Option<f64>)> = segments
-                            .iter()
-                            .map(|s| (
-                                s.index,
-                                s.start_sec,
-                                s.end_sec,
-                                s.text.as_str(),
-                                s.speaker.as_deref(),
-                                s.confidence,
-                            ))
-                            .collect();
+                        let seg_data: Vec<(usize, f64, f64, &str, Option<&str>, Option<f64>)> =
+                            segments
+                                .iter()
+                                .map(|s| {
+                                    (
+                                        s.index,
+                                        s.start_sec,
+                                        s.end_sec,
+                                        s.text.as_str(),
+                                        s.speaker.as_deref(),
+                                        s.confidence,
+                                    )
+                                })
+                                .collect();
                         let _ = db::insert_segments(conn, video_id, &seg_data);
                     }
                 }
@@ -1020,12 +1413,39 @@ impl CrunchrPlugin {
                 // diarization.json into the episode dir alongside video.mkv so
                 // downstream tooling doesn't need to read SQLite.
                 if let Some(job) = self.queue.iter().find(|j| j.recording_id == recording_id) {
-                    if let Some(ep_dir) = job.video_path.parent() {
+                    let video_path = job.video_path.clone();
+                    let audio_path = job.audio_path.clone();
+                    let embed = self.embed_subs;
+                    if let Some(ep_dir) = video_path.parent() {
                         let _ = write_transcript_sidecars(ep_dir, &segments, &full_text);
+                        if embed {
+                            mux_subs_into_mkv(&video_path, &ep_dir.join("transcript.vtt"));
+                        }
+                    }
+                    // Cache voice samples for the Speaker Editor modal (only
+                    // meaningful when diarization actually produced speakers).
+                    if segments.iter().any(|s| s.speaker.is_some()) {
+                        let samples_dir = self
+                            .data_dir
+                            .join("voice_samples")
+                            .join(recording_id.to_string());
+                        let segs_for_slice = segments.clone();
+                        let video_for_slice = video_path.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = voice_samples::slice_samples(
+                                &video_for_slice,
+                                &segs_for_slice,
+                                &samples_dir,
+                            )
+                            .await
+                            {
+                                tracing::warn!("crunchr: voice_samples slice failed: {e}");
+                            }
+                        });
                     }
                     // Clean up WAV file
-                    if let Some(ref audio_path) = job.audio_path {
-                        if let Err(e) = std::fs::remove_file(audio_path) {
+                    if let Some(ref ap) = audio_path {
+                        if let Err(e) = std::fs::remove_file(ap) {
                             tracing::debug!("Failed to clean up WAV: {e}");
                         }
                     }
@@ -1033,7 +1453,12 @@ impl CrunchrPlugin {
 
                 self.start_next_stage(recording_id)
             }
-            PipelineEvent::ChunkingComplete { recording_id, video_id, chunks, word_frequencies } => {
+            PipelineEvent::ChunkingComplete {
+                recording_id,
+                video_id,
+                chunks,
+                word_frequencies,
+            } => {
                 // Write chunk + word frequency results to DB (fast sync writes)
                 if let Some(conn) = self.db.as_ref() {
                     let chunk_tuples: Vec<(usize, &str, f64, f64, usize)> = chunks
@@ -1053,25 +1478,35 @@ impl CrunchrPlugin {
                         if let Some(conn) = self.db.as_ref() {
                             let _ = db::update_video_status(conn, &rec_id_str, "analyzing", None);
                         }
-                        if let Some(job) = self.queue.iter_mut().find(|j| j.recording_id == recording_id) {
+                        if let Some(job) = self
+                            .queue
+                            .iter_mut()
+                            .find(|j| j.recording_id == recording_id)
+                        {
                             job.state = PipelineState::Analyzing;
                         }
 
-                        let transcript = self.db.as_ref()
-                            .and_then(|c| {
-                                c.query_row(
+                        let transcript =
+                            self.db
+                                .as_ref()
+                                .and_then(|c| {
+                                    c.query_row(
                                     "SELECT transcript_text FROM videos WHERE recording_id = ?1",
                                     [&rec_id_str],
                                     |row| row.get::<_, Option<String>>(0),
                                 ).ok().flatten()
-                            })
-                            .unwrap_or_default();
+                                })
+                                .unwrap_or_default();
 
-                        let channel_name = self.queue.iter()
+                        let channel_name = self
+                            .queue
+                            .iter()
                             .find(|j| j.recording_id == recording_id)
                             .map(|j| j.channel_name.clone())
                             .unwrap_or_default();
-                        let title = self.queue.iter()
+                        let title = self
+                            .queue
+                            .iter()
                             .find(|j| j.recording_id == recording_id)
                             .map(|j| j.title.clone())
                             .unwrap_or_default();
@@ -1081,9 +1516,17 @@ impl CrunchrPlugin {
                         return vec![PluginAction::SpawnTask {
                             plugin_name: "crunchr",
                             future: Box::pin(async move {
-                                match analysis::analyze_transcript(&cfg, &channel_name, &title, &transcript).await {
+                                match analysis::analyze_transcript(
+                                    &cfg,
+                                    &channel_name,
+                                    &title,
+                                    &transcript,
+                                )
+                                .await
+                                {
                                     Ok(result) => {
-                                        let topics_json = serde_json::to_string(&result.topics).unwrap_or_default();
+                                        let topics_json = serde_json::to_string(&result.topics)
+                                            .unwrap_or_default();
                                         Box::new(PipelineEvent::AnalysisComplete {
                                             recording_id,
                                             summary: result.summary,
@@ -1092,7 +1535,8 @@ impl CrunchrPlugin {
                                             prompt_tokens: result.prompt_tokens,
                                             completion_tokens: result.completion_tokens,
                                             cost_cents: result.cost_cents,
-                                        }) as Box<dyn Any + Send>
+                                        })
+                                            as Box<dyn Any + Send>
                                     }
                                     Err(e) => {
                                         tracing::warn!("Analysis failed (non-fatal): {e}");
@@ -1104,7 +1548,8 @@ impl CrunchrPlugin {
                                             prompt_tokens: 0,
                                             completion_tokens: 0,
                                             cost_cents: 0,
-                                        }) as Box<dyn Any + Send>
+                                        })
+                                            as Box<dyn Any + Send>
                                     }
                                 }
                             }),
@@ -1116,7 +1561,11 @@ impl CrunchrPlugin {
                 if let Some(conn) = self.db.as_ref() {
                     let _ = db::update_video_status(conn, &rec_id_str, "complete", None);
                 }
-                if let Some(job) = self.queue.iter_mut().find(|j| j.recording_id == recording_id) {
+                if let Some(job) = self
+                    .queue
+                    .iter_mut()
+                    .find(|j| j.recording_id == recording_id)
+                {
                     job.state = PipelineState::Complete;
                 }
                 self.in_flight.remove(&recording_id);
@@ -1151,17 +1600,29 @@ impl CrunchrPlugin {
                             recording_id.to_string(),
                         ],
                     );
-                    let _ = db::update_video_status(conn, &recording_id.to_string(), "complete", None);
+                    let _ =
+                        db::update_video_status(conn, &recording_id.to_string(), "complete", None);
                 }
-                if let Some(job) = self.queue.iter_mut().find(|j| j.recording_id == recording_id) {
+                if let Some(job) = self
+                    .queue
+                    .iter_mut()
+                    .find(|j| j.recording_id == recording_id)
+                {
                     job.state = PipelineState::Complete;
                 }
                 self.in_flight.remove(&recording_id);
                 self.refresh_word_frequencies();
                 Vec::new()
             }
-            PipelineEvent::StageError { recording_id, error } => {
-                if let Some(job) = self.queue.iter_mut().find(|j| j.recording_id == recording_id) {
+            PipelineEvent::StageError {
+                recording_id,
+                error,
+            } => {
+                if let Some(job) = self
+                    .queue
+                    .iter_mut()
+                    .find(|j| j.recording_id == recording_id)
+                {
                     job.state = PipelineState::Failed;
                     job.error = Some(error.clone());
                 }
@@ -1226,10 +1687,13 @@ impl Plugin for CrunchrPlugin {
         let backend = transcribe::create_backend(crunchr_config);
         let backend_name = backend.backend_name();
 
-        // Check if the backend is actually usable
+        // Check if the backend is actually usable. API backends are always
+        // "available" (network/key issues surface at runtime); whisper-cli
+        // requires the subprocess to be on PATH.
         self.backend_available = match backend_name {
             "whisper-cli" => pipeline::is_whisper_available(),
-            "voxtral" => true, // API backends are always "available" (may fail at runtime)
+            "whisperx-local" => transcribe::whisperx_local::is_available(),
+            "voxtral-openrouter" | "voxtral-api" | "voxtral-local" => true,
             _ => false,
         };
 
@@ -1238,6 +1702,12 @@ impl Plugin for CrunchrPlugin {
         }
 
         self.backend = Some(Arc::from(backend));
+
+        // Cache the configured env-var name so try_init_diarize_backend can
+        // honour `crunchr.api_key_env` instead of always hitting MISTRAL_API_KEY.
+        self.diarize_api_key_env = crunchr_config.api_key_env.clone();
+        self.embed_subs = crunchr_config.embed_subs;
+        self.diarize_requested = crunchr_config.diarize;
 
         // Analysis config
         let analysis = &crunchr_config.analysis;
@@ -1272,7 +1742,12 @@ impl Plugin for CrunchrPlugin {
     }
 
     fn on_event(&mut self, event: &DaemonEvent, app: &AppState) -> Vec<PluginAction> {
-        if let DaemonEvent::RecordingFinished { job_id, final_state, .. } = event {
+        if let DaemonEvent::RecordingFinished {
+            job_id,
+            final_state,
+            ..
+        } = event
+        {
             if *final_state != RecordingState::Finished {
                 return Vec::new();
             }
@@ -1285,7 +1760,10 @@ impl Plugin for CrunchrPlugin {
             if let Some(rec) = app.recordings.get(job_id) {
                 let channel_key = format!("{}:{}", rec.platform, rec.channel_id);
                 let is_tandem = self.tandem_channels.contains(&channel_key)
-                    || rec.playlist.as_ref().is_some_and(|p| self.tandem_playlists.contains(p));
+                    || rec
+                        .playlist
+                        .as_ref()
+                        .is_some_and(|p| self.tandem_playlists.contains(p));
 
                 // Catalog-pull jobs drop a `.crunchr-auto` marker in the episode dir
                 // so a one-shot `strivo pull` transcribes without editing tandem config.
@@ -1299,7 +1777,10 @@ impl Plugin for CrunchrPlugin {
                 if is_tandem || crunchr_auto_marker {
                     let video_path = rec.output_path.clone();
                     let channel_name = rec.channel_name.clone();
-                    let title = rec.stream_title.clone().unwrap_or_else(|| "Untitled".to_string());
+                    let title = rec
+                        .stream_title
+                        .clone()
+                        .unwrap_or_else(|| "Untitled".to_string());
                     return self.queue_recording(*job_id, channel_name, title, video_path);
                 }
             }
@@ -1316,6 +1797,18 @@ impl Plugin for CrunchrPlugin {
         // --- Config modal intercepts all keys when active ---
         if self.config_modal != ConfigModalState::Hidden {
             return self.handle_config_modal_key(key, app);
+        }
+
+        // --- Speaker Editor modal intercepts all keys when active ---
+        if self.speaker_modal.is_active() {
+            return self.handle_speaker_modal_key(key);
+        }
+
+        // --- Pane-level keybindings (apply across views) ---
+        // `s` — open Speaker Editor for the focused/most-recent diarized
+        // transcript. No-op when no diarized recording is available.
+        if matches!(key.code, KeyCode::Char('s')) && key.modifiers.is_empty() {
+            return self.open_speaker_modal_for_selected();
         }
 
         // --- View-specific key handling ---
@@ -1346,13 +1839,7 @@ impl Plugin for CrunchrPlugin {
         vec![PANE_ID]
     }
 
-    fn render_pane(
-        &self,
-        _pane_id: PaneId,
-        frame: &mut Frame,
-        area: Rect,
-        app: &AppState,
-    ) {
+    fn render_pane(&self, _pane_id: PaneId, frame: &mut Frame, area: Rect, app: &AppState) {
         // Render the active view
         match self.view {
             CrunchrView::Search => render::render(self, frame, area, app),
@@ -1364,12 +1851,19 @@ impl Plugin for CrunchrPlugin {
         if self.config_modal != ConfigModalState::Hidden {
             render::render_config_modal(self, frame, area);
         }
+
+        // Overlay Speaker Editor modal if active (drawn last so it sits on top).
+        if self.speaker_modal.is_active() {
+            render::render_speaker_modal(self, frame, area);
+        }
     }
 
     fn status_line(&self, _app: &AppState) -> Option<String> {
-        let pending = self.queue.iter().filter(|j| {
-            j.state != PipelineState::Complete && j.state != PipelineState::Failed
-        }).count();
+        let pending = self
+            .queue
+            .iter()
+            .filter(|j| j.state != PipelineState::Complete && j.state != PipelineState::Failed)
+            .count();
 
         if pending > 0 {
             Some(format!("CR:{pending}"))
@@ -1399,7 +1893,9 @@ impl Plugin for CrunchrPlugin {
         lines.push(Line::raw(""));
         lines.push(Line::styled(
             "  Transcript",
-            Style::new().fg(Theme::secondary()).add_modifier(Modifier::BOLD),
+            Style::new()
+                .fg(Theme::secondary())
+                .add_modifier(Modifier::BOLD),
         ));
 
         let Some(info) = self.recording_info(&job_id.to_string()) else {
@@ -1432,7 +1928,9 @@ impl Plugin for CrunchrPlugin {
             lines.push(Line::raw(""));
             lines.push(Line::styled(
                 "  Analysis",
-                Style::new().fg(Theme::secondary()).add_modifier(Modifier::BOLD),
+                Style::new()
+                    .fg(Theme::secondary())
+                    .add_modifier(Modifier::BOLD),
             ));
             if let Some(ref summary) = info.summary {
                 lines.push(Line::styled(
@@ -1465,10 +1963,7 @@ impl Plugin for CrunchrPlugin {
                 lines.push(Line::from(vec![
                     Span::styled("  Tokens:   ", Style::new().fg(Theme::dim())),
                     Span::styled(
-                        format!(
-                            "{} in · {} out",
-                            info.prompt_tokens, info.completion_tokens
-                        ),
+                        format!("{} in · {} out", info.prompt_tokens, info.completion_tokens),
                         Style::new().fg(Theme::fg()),
                     ),
                 ]));
@@ -1530,17 +2025,32 @@ fn write_transcript_sidecars(
     }
     std::fs::write(episode_dir.join("transcript.vtt"), vtt)?;
 
+    // transcript.srt — same cues as VTT but with `,` ms separator and inline
+    // `[Speaker] text` labels (SRT has no native speaker cue).
+    let mut srt = String::new();
+    for (i, s) in segments.iter().enumerate() {
+        let start = srt_timestamp(s.start_sec);
+        let end = srt_timestamp(s.end_sec);
+        srt.push_str(&format!("{}\n{start} --> {end}\n", i + 1));
+        match s.speaker.as_deref().filter(|s| !s.is_empty()) {
+            Some(spk) => srt.push_str(&format!("[{spk}] {}\n\n", s.text)),
+            None => srt.push_str(&format!("{}\n\n", s.text)),
+        }
+    }
+    std::fs::write(episode_dir.join("transcript.srt"), srt)?;
+
     // diarization.json — only if at least one segment carries a speaker label
     if segments.iter().any(|s| s.speaker.is_some()) {
-        let dz = serde_json::json!(
-            segments.iter().filter_map(|s| s.speaker.as_ref().map(|spk| {
+        let dz = serde_json::json!(segments
+            .iter()
+            .filter_map(|s| s.speaker.as_ref().map(|spk| {
                 serde_json::json!({
                     "start": s.start_sec,
                     "end": s.end_sec,
                     "speaker": spk,
                 })
-            })).collect::<Vec<_>>()
-        );
+            }))
+            .collect::<Vec<_>>());
         std::fs::write(
             episode_dir.join("diarization.json"),
             serde_json::to_string_pretty(&dz).unwrap_or_default(),
@@ -1557,4 +2067,134 @@ fn vtt_timestamp(secs: f64) -> String {
     let s = (total_ms / 1000) % 60;
     let ms = total_ms % 1000;
     format!("{h:02}:{m:02}:{s:02}.{ms:03}")
+}
+
+fn srt_timestamp(secs: f64) -> String {
+    // SRT uses `,` instead of `.` as the millisecond separator. Other than that
+    // it is identical to the VTT format.
+    vtt_timestamp(secs).replace('.', ",")
+}
+
+/// Soft-mux the generated `.vtt` subtitles into the recording's `.mkv` via
+/// `mkvmerge`. Writes to a sibling `.tmp.mkv` and atomically renames over the
+/// original on success. Silently skips when `mkvmerge` is missing on PATH or
+/// when the inputs don't exist — this is a best-effort decoration of the
+/// recording, never a hard requirement.
+fn mux_subs_into_mkv(video_path: &std::path::Path, vtt_path: &std::path::Path) {
+    if which::which("mkvmerge").is_err() {
+        tracing::debug!("crunchr: mkvmerge not on PATH; skipping subtitle mux");
+        return;
+    }
+    if !video_path.exists() || !vtt_path.exists() {
+        tracing::debug!(
+            "crunchr: mux skipped, missing {} or {}",
+            video_path.display(),
+            vtt_path.display()
+        );
+        return;
+    }
+    let tmp = video_path.with_extension("mkv.tmp");
+    let status = std::process::Command::new("mkvmerge")
+        .arg("-o")
+        .arg(&tmp)
+        .arg(video_path)
+        .arg("--language")
+        .arg("0:eng")
+        .arg("--track-name")
+        .arg("0:CrunchR transcript")
+        .arg(vtt_path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    match status {
+        Ok(s) if s.success() => {
+            if let Err(e) = std::fs::rename(&tmp, video_path) {
+                tracing::warn!(
+                    "crunchr: mkvmerge succeeded but rename failed: {e} ({} -> {})",
+                    tmp.display(),
+                    video_path.display()
+                );
+                let _ = std::fs::remove_file(&tmp);
+            } else {
+                tracing::info!("crunchr: muxed subtitles into {}", video_path.display());
+            }
+        }
+        Ok(s) => {
+            tracing::warn!("crunchr: mkvmerge exited with {s}");
+            let _ = std::fs::remove_file(&tmp);
+        }
+        Err(e) => {
+            tracing::warn!("crunchr: failed to spawn mkvmerge: {e}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crunchr::types::Segment;
+
+    fn seg(idx: usize, start: f64, end: f64, text: &str, speaker: Option<&str>) -> Segment {
+        Segment {
+            index: idx,
+            start_sec: start,
+            end_sec: end,
+            text: text.to_string(),
+            speaker: speaker.map(|s| s.to_string()),
+            confidence: None,
+        }
+    }
+
+    #[test]
+    fn srt_timestamp_uses_comma_separator() {
+        assert_eq!(srt_timestamp(0.0), "00:00:00,000");
+        assert_eq!(srt_timestamp(3661.123), "01:01:01,123");
+    }
+
+    #[test]
+    fn vtt_timestamp_uses_dot_separator() {
+        assert_eq!(vtt_timestamp(0.0), "00:00:00.000");
+        assert_eq!(vtt_timestamp(3661.123), "01:01:01.123");
+    }
+
+    #[test]
+    fn sidecar_writer_emits_all_artifacts_and_srt_format() {
+        let tmp = tempfile_dir("sidecar");
+        let segs = vec![
+            seg(0, 0.0, 1.5, "hello world", Some("Speaker 0")),
+            seg(1, 1.5, 3.0, "no speaker line", None),
+        ];
+        write_transcript_sidecars(&tmp, &segs, "hello world no speaker line").unwrap();
+
+        // All three primary sidecars exist.
+        assert!(tmp.join("transcript.json").exists());
+        assert!(tmp.join("transcript.vtt").exists());
+        assert!(tmp.join("transcript.srt").exists());
+        assert!(tmp.join("diarization.json").exists());
+
+        let srt = std::fs::read_to_string(tmp.join("transcript.srt")).unwrap();
+        // SRT cue indexing is 1-based and the comma separator is used.
+        assert!(srt.starts_with("1\n00:00:00,000 --> 00:00:01,500\n"));
+        assert!(srt.contains("[Speaker 0] hello world"));
+        // Unspeakered line carries no `[label]` prefix.
+        assert!(srt.contains("\nno speaker line\n"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn sidecar_writer_skips_diarization_when_no_speakers() {
+        let tmp = tempfile_dir("nodia");
+        let segs = vec![seg(0, 0.0, 1.0, "alone", None)];
+        write_transcript_sidecars(&tmp, &segs, "alone").unwrap();
+        assert!(!tmp.join("diarization.json").exists());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    fn tempfile_dir(tag: &str) -> std::path::PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!("strivo-crunchr-{tag}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
 }

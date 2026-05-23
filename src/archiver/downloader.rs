@@ -57,7 +57,10 @@ pub async fn download_video(
         if stderr.contains("has already been recorded") {
             return Ok(());
         }
-        anyhow::bail!("yt-dlp download failed: {}", stderr.chars().take(300).collect::<String>());
+        anyhow::bail!(
+            "yt-dlp download failed: {}",
+            stderr.chars().take(300).collect::<String>()
+        );
     }
 
     Ok(())
@@ -77,11 +80,17 @@ mod tests {
 
     #[test]
     fn video_url_youtube() {
-        assert_eq!(video_url("abc123", "youtube"), "https://www.youtube.com/watch?v=abc123");
+        assert_eq!(
+            video_url("abc123", "youtube"),
+            "https://www.youtube.com/watch?v=abc123"
+        );
     }
 
     #[test]
     fn video_url_twitch() {
-        assert_eq!(video_url("12345", "twitch"), "https://www.twitch.tv/videos/12345");
+        assert_eq!(
+            video_url("12345", "twitch"),
+            "https://www.twitch.tv/videos/12345"
+        );
     }
 }

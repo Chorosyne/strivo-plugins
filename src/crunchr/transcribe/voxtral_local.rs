@@ -24,10 +24,8 @@ impl VoxtralLocalBackend {
 impl TranscriptionBackend for VoxtralLocalBackend {
     async fn transcribe(&self, audio_path: &Path) -> Result<TranscriptionResult> {
         let audio_bytes = tokio::fs::read(audio_path).await?;
-        let audio_b64 = base64::Engine::encode(
-            &base64::engine::general_purpose::STANDARD,
-            &audio_bytes,
-        );
+        let audio_b64 =
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &audio_bytes);
 
         let file_name = audio_path
             .file_name()

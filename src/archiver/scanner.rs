@@ -37,26 +37,23 @@ pub async fn scan_channel(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("yt-dlp scan failed: {}", stderr.chars().take(300).collect::<String>());
+        anyhow::bail!(
+            "yt-dlp scan failed: {}",
+            stderr.chars().take(300).collect::<String>()
+        );
     }
 
     let json_str = String::from_utf8_lossy(&output.stdout);
     let parsed: serde_json::Value = serde_json::from_str(&json_str)?;
 
-    let entries = parsed["entries"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
+    let entries = parsed["entries"].as_array().cloned().unwrap_or_default();
 
     let videos: Vec<VideoEntry> = entries
         .iter()
         .filter_map(|entry| {
             let video_id = entry["id"].as_str()?.to_string();
             let title = entry["title"].as_str().unwrap_or("Untitled").to_string();
-            let upload_date = entry["upload_date"]
-                .as_str()
-                .unwrap_or("")
-                .to_string();
+            let upload_date = entry["upload_date"].as_str().unwrap_or("").to_string();
             let duration_secs = entry["duration"].as_f64();
             let playlist = entry["playlist_title"]
                 .as_str()

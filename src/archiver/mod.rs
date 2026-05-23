@@ -23,8 +23,8 @@ use strivo_core::plugin::{
     DaemonEventKind, PaneId, Plugin, PluginAction, PluginCommand, PluginContext,
 };
 use types::{
-    ArchiveJob, ArchiveState, ArchiverEvent, ArchiverView, ConfigModalState,
-    PickerState, RecordingFilter,
+    ArchiveJob, ArchiveState, ArchiverEvent, ArchiverView, ConfigModalState, PickerState,
+    RecordingFilter,
 };
 
 pub const PANE_ID: PaneId = "archiver";
@@ -105,7 +105,10 @@ impl ArchiverPlugin {
         // Build channel URL
         let channel_url = match channel.platform {
             strivo_core::platform::PlatformKind::Twitch => {
-                format!("https://www.twitch.tv/{}/videos?filter=archives", channel.name)
+                format!(
+                    "https://www.twitch.tv/{}/videos?filter=archives",
+                    channel.name
+                )
             }
             strivo_core::platform::PlatformKind::YouTube => {
                 format!("https://www.youtube.com/@{}/videos", channel.name)
@@ -130,8 +133,7 @@ impl ArchiverPlugin {
 
         // Get cookies path for YouTube
         let cookies = if channel.platform == strivo_core::platform::PlatformKind::YouTube {
-            self.config.as_ref()
-                .and_then(|_| None::<PathBuf>) // Would read from AppConfig.youtube.cookies_path
+            self.config.as_ref().and_then(|_| None::<PathBuf>) // Would read from AppConfig.youtube.cookies_path
         } else {
             None
         };
@@ -142,10 +144,8 @@ impl ArchiverPlugin {
             plugin_name: "archiver",
             future: Box::pin(async move {
                 match scanner::scan_channel(&url, &archive, cookies.as_deref()).await {
-                    Ok(videos) => Box::new(ArchiverEvent::ScanComplete {
-                        job_id,
-                        videos,
-                    }) as Box<dyn Any + Send>,
+                    Ok(videos) => Box::new(ArchiverEvent::ScanComplete { job_id, videos })
+                        as Box<dyn Any + Send>,
                     Err(e) => Box::new(ArchiverEvent::JobError {
                         job_id,
                         error: format!("Scan failed: {e}"),
@@ -168,7 +168,9 @@ impl ArchiverPlugin {
             ))];
         }
 
-        let Some(conn) = self.db.as_ref() else { return Vec::new() };
+        let Some(conn) = self.db.as_ref() else {
+            return Vec::new();
+        };
 
         // Get channel ID from DB
         let channel_id = conn.query_row(
@@ -176,11 +178,15 @@ impl ArchiverPlugin {
             [&job.channel_url],
             |r| r.get::<_, i64>(0),
         );
-        let Ok(channel_id) = channel_id else { return Vec::new() };
+        let Ok(channel_id) = channel_id else {
+            return Vec::new();
+        };
 
         // Get next pending video
         let pending = db::get_pending_videos(conn, channel_id);
-        let Ok(pending) = pending else { return Vec::new() };
+        let Ok(pending) = pending else {
+            return Vec::new();
+        };
 
         let Some((video_id, title, _date, playlist)) = pending.into_iter().next() else {
             job.state = ArchiveState::Complete;
@@ -207,11 +213,11 @@ impl ArchiverPlugin {
                     fragments,
                     None,
                     playlist.as_deref(),
-                ).await {
-                    Ok(()) => Box::new(ArchiverEvent::VideoDownloaded {
-                        job_id,
-                        video_id,
-                    }) as Box<dyn Any + Send>,
+                )
+                .await
+                {
+                    Ok(()) => Box::new(ArchiverEvent::VideoDownloaded { job_id, video_id })
+                        as Box<dyn Any + Send>,
                     Err(e) => Box::new(ArchiverEvent::JobError {
                         job_id,
                         error: format!("Download failed: {e}"),
@@ -223,11 +229,15 @@ impl ArchiverPlugin {
 
     /// Open the config modal, cloning current config into draft.
     fn open_config_modal(&mut self, app: &AppState) {
-        self.cached_channels = app.channels.iter().map(|ch| {
-            let key = format!("{}:{}", ch.platform, ch.id);
-            let display = format!("[{}] {}", ch.platform, ch.display_name);
-            (key, display)
-        }).collect();
+        self.cached_channels = app
+            .channels
+            .iter()
+            .map(|ch| {
+                let key = format!("{}:{}", ch.platform, ch.id);
+                let display = format!("[{}] {}", ch.platform, ch.display_name);
+                (key, display)
+            })
+            .collect();
 
         let draft = self.config.clone().unwrap_or_default();
         self.config_draft = Some(draft);
@@ -241,7 +251,12 @@ impl ArchiverPlugin {
 
     /// Handle keys while config modal is active.
     fn handle_config_modal_key(&mut self, key: KeyEvent, _app: &AppState) -> Vec<PluginAction> {
-        let ConfigModalState::Active { ref mut selected_field, ref mut editing, static_field_count } = self.config_modal else {
+        let ConfigModalState::Active {
+            ref mut selected_field,
+            ref mut editing,
+            static_field_count,
+        } = self.config_modal
+        else {
             return Vec::new();
         };
         let total_fields = static_field_count + self.cached_channels.len();
@@ -253,14 +268,26 @@ impl ArchiverPlugin {
 
         if *editing {
             match key.code {
-                KeyCode::Esc | KeyCode::Enter => { *editing = false; }
+                KeyCode::Esc | KeyCode::Enter => {
+                    *editing = false;
+                }
                 KeyCode::Backspace => {
                     if let Some(ref mut draft) = self.config_draft {
                         match *selected_field {
-                            1 => { let s = draft.archive_dir.to_string_lossy().to_string(); if !s.is_empty() { draft.archive_dir = PathBuf::from(&s[..s.len().saturating_sub(1)]); } }
-                            2 => { draft.format.pop(); }
+                            1 => {
+                                let s = draft.archive_dir.to_string_lossy().to_string();
+                                if !s.is_empty() {
+                                    draft.archive_dir =
+                                        PathBuf::from(&s[..s.len().saturating_sub(1)]);
+                                }
+                            }
+                            2 => {
+                                draft.format.pop();
+                            }
                             3 => { /* number field - no backspace */ }
-                            4 => { draft.rate_limit.pop(); }
+                            4 => {
+                                draft.rate_limit.pop();
+                            }
                             _ => {}
                         }
                     }
@@ -268,11 +295,16 @@ impl ArchiverPlugin {
                 KeyCode::Char(c) => {
                     if let Some(ref mut draft) = self.config_draft {
                         match *selected_field {
-                            1 => { let mut s = draft.archive_dir.to_string_lossy().to_string(); s.push(c); draft.archive_dir = PathBuf::from(s); }
+                            1 => {
+                                let mut s = draft.archive_dir.to_string_lossy().to_string();
+                                s.push(c);
+                                draft.archive_dir = PathBuf::from(s);
+                            }
                             2 => draft.format.push(c),
                             3 => {
                                 if let Some(d) = c.to_digit(10) {
-                                    draft.concurrent_fragments = draft.concurrent_fragments * 10 + d;
+                                    draft.concurrent_fragments =
+                                        draft.concurrent_fragments * 10 + d;
                                 }
                             }
                             4 => draft.rate_limit.push(c),
@@ -351,10 +383,13 @@ impl ArchiverPlugin {
         self.refresh_picker_list(app);
 
         match key.code {
-            KeyCode::Tab => { self.view = ArchiverView::ChannelList; }
+            KeyCode::Tab => {
+                self.view = ArchiverView::ChannelList;
+            }
             KeyCode::Char('j') | KeyCode::Down => {
                 if !self.picker.visible_ids.is_empty() {
-                    self.picker.selected = (self.picker.selected + 1) % self.picker.visible_ids.len();
+                    self.picker.selected =
+                        (self.picker.selected + 1) % self.picker.visible_ids.len();
                 }
             }
             KeyCode::Char('k') | KeyCode::Up => {
@@ -395,7 +430,9 @@ impl ArchiverPlugin {
     }
 
     fn refresh_picker_list(&mut self, app: &AppState) {
-        let finished: Vec<_> = app.recordings.values()
+        let finished: Vec<_> = app
+            .recordings
+            .values()
             .filter(|r| r.state == RecordingState::Finished)
             .filter(|r| match &self.picker.filter {
                 RecordingFilter::All => true,
@@ -403,9 +440,7 @@ impl ArchiverPlugin {
                     let key = format!("{}:{}", r.platform, r.channel_id);
                     key == *ch
                 }
-                RecordingFilter::ByPlaylist(pl) => {
-                    r.playlist.as_deref() == Some(pl.as_str())
-                }
+                RecordingFilter::ByPlaylist(pl) => r.playlist.as_deref() == Some(pl.as_str()),
             })
             .collect();
 
@@ -418,11 +453,16 @@ impl ArchiverPlugin {
     fn cycle_picker_filter(&mut self, app: &AppState) {
         let channels: Vec<String> = {
             let mut seen = HashSet::new();
-            app.recordings.values()
+            app.recordings
+                .values()
                 .filter(|r| r.state == RecordingState::Finished)
                 .filter_map(|r| {
                     let key = format!("{}:{}", r.platform, r.channel_id);
-                    if seen.insert(key.clone()) { Some(key) } else { None }
+                    if seen.insert(key.clone()) {
+                        Some(key)
+                    } else {
+                        None
+                    }
                 })
                 .collect()
         };
@@ -450,16 +490,25 @@ impl ArchiverPlugin {
 
     fn process_selected_recordings(&mut self, app: &AppState) -> Vec<PluginAction> {
         let ids: Vec<uuid::Uuid> = if self.picker.selections.is_empty() {
-            self.picker.visible_ids.get(self.picker.selected).copied().into_iter().collect()
+            self.picker
+                .visible_ids
+                .get(self.picker.selected)
+                .copied()
+                .into_iter()
+                .collect()
         } else {
             self.picker.selections.drain().collect()
         };
 
         // Clone matching channels to avoid borrow conflict with self.start_archive()
-        let channel_matches: Vec<_> = ids.iter()
+        let channel_matches: Vec<_> = ids
+            .iter()
             .filter_map(|id| app.recordings.get(id))
             .filter_map(|rec| {
-                self.channels.iter().find(|c| c.id == rec.channel_id).cloned()
+                self.channels
+                    .iter()
+                    .find(|c| c.id == rec.channel_id)
+                    .cloned()
             })
             .collect();
 
@@ -485,7 +534,11 @@ impl ArchiverPlugin {
 
                     // Insert videos into DB
                     if let Some(conn) = self.db.as_ref() {
-                        let config = self.config.as_ref().map(|c| c.archive_dir.display().to_string()).unwrap_or_default();
+                        let config = self
+                            .config
+                            .as_ref()
+                            .map(|c| c.archive_dir.display().to_string())
+                            .unwrap_or_default();
                         if let Ok(channel_id) = db::upsert_channel(
                             conn,
                             &job.channel_name,
@@ -493,13 +546,18 @@ impl ArchiverPlugin {
                             &job.platform.to_string(),
                             &config,
                         ) {
-                            let data: Vec<_> = videos.iter().map(|v| (
-                                v.video_id.clone(),
-                                v.title.clone(),
-                                v.upload_date.clone(),
-                                v.duration_secs,
-                                v.playlist.clone(),
-                            )).collect();
+                            let data: Vec<_> = videos
+                                .iter()
+                                .map(|v| {
+                                    (
+                                        v.video_id.clone(),
+                                        v.title.clone(),
+                                        v.upload_date.clone(),
+                                        v.duration_secs,
+                                        v.playlist.clone(),
+                                    )
+                                })
+                                .collect();
                             let _ = db::insert_videos(conn, channel_id, &data);
                         }
                     }
@@ -509,7 +567,9 @@ impl ArchiverPlugin {
                     if let Some(job) = self.jobs.iter_mut().find(|j| j.id == job_id) {
                         job.state = ArchiveState::Complete;
                     }
-                    return vec![PluginAction::SetStatus("Archiver: channel fully archived".to_string())];
+                    return vec![PluginAction::SetStatus(
+                        "Archiver: channel fully archived".to_string(),
+                    )];
                 }
 
                 self.start_next_download(job_id)
@@ -604,17 +664,28 @@ impl Plugin for ArchiverPlugin {
             DaemonEvent::ChannelsUpdated(channels) => {
                 self.channels = channels.clone();
             }
-            DaemonEvent::RecordingFinished { job_id, final_state, .. } => {
+            DaemonEvent::RecordingFinished {
+                job_id,
+                final_state,
+                ..
+            } => {
                 if *final_state != RecordingState::Finished || !self.enabled {
                     return Vec::new();
                 }
                 if let Some(rec) = app.recordings.get(job_id) {
                     let channel_key = format!("{}:{}", rec.platform, rec.channel_id);
                     let is_tandem = self.tandem_channels.contains(&channel_key)
-                        || rec.playlist.as_ref().is_some_and(|p| self.tandem_playlists.contains(p));
+                        || rec
+                            .playlist
+                            .as_ref()
+                            .is_some_and(|p| self.tandem_playlists.contains(p));
 
                     if is_tandem {
-                        let channel = self.channels.iter().find(|c| c.id == rec.channel_id).cloned();
+                        let channel = self
+                            .channels
+                            .iter()
+                            .find(|c| c.id == rec.channel_id)
+                            .cloned();
                         if let Some(channel) = channel {
                             return self.start_archive(&channel);
                         }
@@ -654,44 +725,40 @@ impl Plugin for ArchiverPlugin {
             KeyCode::Char('c') => {
                 self.open_config_modal(app);
             }
-            KeyCode::Char('j') | KeyCode::Down => {
-                match self.view {
-                    ArchiverView::ChannelList => {
-                        if !self.channels.is_empty() {
-                            self.selected_channel = (self.selected_channel + 1) % self.channels.len();
-                        }
+            KeyCode::Char('j') | KeyCode::Down => match self.view {
+                ArchiverView::ChannelList => {
+                    if !self.channels.is_empty() {
+                        self.selected_channel = (self.selected_channel + 1) % self.channels.len();
                     }
-                    ArchiverView::ArchiveQueue => {
-                        if !self.jobs.is_empty() {
-                            self.selected_job = (self.selected_job + 1) % self.jobs.len();
-                        }
-                    }
-                    _ => {}
                 }
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                match self.view {
-                    ArchiverView::ChannelList => {
-                        if !self.channels.is_empty() {
-                            self.selected_channel = if self.selected_channel == 0 {
-                                self.channels.len() - 1
-                            } else {
-                                self.selected_channel - 1
-                            };
-                        }
+                ArchiverView::ArchiveQueue => {
+                    if !self.jobs.is_empty() {
+                        self.selected_job = (self.selected_job + 1) % self.jobs.len();
                     }
-                    ArchiverView::ArchiveQueue => {
-                        if !self.jobs.is_empty() {
-                            self.selected_job = if self.selected_job == 0 {
-                                self.jobs.len() - 1
-                            } else {
-                                self.selected_job - 1
-                            };
-                        }
-                    }
-                    _ => {}
                 }
-            }
+                _ => {}
+            },
+            KeyCode::Char('k') | KeyCode::Up => match self.view {
+                ArchiverView::ChannelList => {
+                    if !self.channels.is_empty() {
+                        self.selected_channel = if self.selected_channel == 0 {
+                            self.channels.len() - 1
+                        } else {
+                            self.selected_channel - 1
+                        };
+                    }
+                }
+                ArchiverView::ArchiveQueue => {
+                    if !self.jobs.is_empty() {
+                        self.selected_job = if self.selected_job == 0 {
+                            self.jobs.len() - 1
+                        } else {
+                            self.selected_job - 1
+                        };
+                    }
+                }
+                _ => {}
+            },
             KeyCode::Enter => {
                 if self.view == ArchiverView::ChannelList {
                     if let Some(channel) = self.channels.get(self.selected_channel).cloned() {
@@ -702,7 +769,9 @@ impl Plugin for ArchiverPlugin {
             KeyCode::Char('d') => {
                 if self.view == ArchiverView::ArchiveQueue {
                     if let Some(job) = self.jobs.get_mut(self.selected_job) {
-                        if job.state == ArchiveState::Downloading || job.state == ArchiveState::Scanning {
+                        if job.state == ArchiveState::Downloading
+                            || job.state == ArchiveState::Scanning
+                        {
                             job.state = ArchiveState::Failed;
                             job.error = Some("Cancelled by user".to_string());
                         }
@@ -737,15 +806,11 @@ impl Plugin for ArchiverPlugin {
         vec![PANE_ID]
     }
 
-    fn render_pane(
-        &self,
-        _pane_id: PaneId,
-        frame: &mut Frame,
-        area: Rect,
-        app: &AppState,
-    ) {
+    fn render_pane(&self, _pane_id: PaneId, frame: &mut Frame, area: Rect, app: &AppState) {
         match self.view {
-            ArchiverView::RecordingPicker => render::render_recording_picker(self, frame, area, app),
+            ArchiverView::RecordingPicker => {
+                render::render_recording_picker(self, frame, area, app)
+            }
             _ => render::render(self, frame, area, app),
         }
 
@@ -756,9 +821,11 @@ impl Plugin for ArchiverPlugin {
     }
 
     fn status_line(&self, _app: &AppState) -> Option<String> {
-        let active = self.jobs.iter().filter(|j| {
-            j.state == ArchiveState::Downloading || j.state == ArchiveState::Scanning
-        }).count();
+        let active = self
+            .jobs
+            .iter()
+            .filter(|j| j.state == ArchiveState::Downloading || j.state == ArchiveState::Scanning)
+            .count();
 
         if active > 0 {
             Some(format!("AR:{active}"))

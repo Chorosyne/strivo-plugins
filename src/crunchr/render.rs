@@ -1,16 +1,21 @@
 use ratatui::{
-    Frame,
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
+    widgets::{
+        Block, BorderType, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation,
+        ScrollbarState, Wrap,
+    },
+    Frame,
 };
 
 use strivo_core::app::AppState;
 use strivo_core::tui::theme::Theme;
 
+use super::types::{
+    ConfigModalState, PipelineState, RecordingFilter, SearchMode, SpeakerModalState,
+};
 use super::CrunchrPlugin;
-use super::types::{ConfigModalState, PipelineState, RecordingFilter, SearchMode};
 
 pub fn render(plugin: &CrunchrPlugin, frame: &mut Frame, area: Rect, _app: &AppState) {
     let block = Block::default()
@@ -54,15 +59,23 @@ fn render_no_backend(frame: &mut Frame, area: Rect) {
             Style::new().fg(Theme::fg()),
         ),
         Line::styled(
-            "    backend = \"voxtral-api\"   # Mistral API ($0.18/hr, diarization)",
+            "    backend = \"voxtral-openrouter\" # default — OpenRouter ($0.18/hr, set OPENROUTER_API_KEY)",
             Style::new().fg(Theme::dim()),
         ),
         Line::styled(
-            "    backend = \"voxtral-local\" # self-hosted (free, needs GPU)",
+            "    backend = \"voxtral-api\"        # Mistral direct ($0.18/hr, diarization, set MISTRAL_API_KEY)",
             Style::new().fg(Theme::dim()),
         ),
         Line::styled(
-            "    backend = \"whisper-cli\"   # local (pip install openai-whisper)",
+            "    backend = \"whisperx-local\"     # self-hosted GPU — Whisper + pyannote, 8 GB VRAM, set HF_TOKEN",
+            Style::new().fg(Theme::dim()),
+        ),
+        Line::styled(
+            "    backend = \"voxtral-local\"      # self-hosted Voxtral via vLLM (no diarization)",
+            Style::new().fg(Theme::dim()),
+        ),
+        Line::styled(
+            "    backend = \"whisper-cli\"        # local (pip install openai-whisper)",
             Style::new().fg(Theme::dim()),
         ),
         Line::raw(""),
@@ -86,13 +99,23 @@ fn render_search_bar(plugin: &CrunchrPlugin, frame: &mut Frame, area: Rect) {
 
     // Width-aware: hide mode label on narrow terminals
     let show_mode = area.width > 50;
-    let mode_width = if show_mode { mode_label.len() as u16 + 4 } else { 0 };
+    let mode_width = if show_mode {
+        mode_label.len() as u16 + 4
+    } else {
+        0
+    };
 
-    let pad_width = area.width
-        .saturating_sub(5 + plugin.search_query.len() as u16 + mode_width) as usize;
+    let pad_width =
+        area.width
+            .saturating_sub(5 + plugin.search_query.len() as u16 + mode_width) as usize;
 
     let mut spans = vec![
-        Span::styled(" / ", Style::new().fg(Theme::secondary()).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            " / ",
+            Style::new()
+                .fg(Theme::secondary())
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(&plugin.search_query, Style::new().fg(Theme::fg())),
         Span::styled(cursor, Style::new().fg(Theme::primary())),
         Span::raw(format!("{:width$}", "", width = pad_width)),
@@ -109,10 +132,7 @@ fn render_search_bar(plugin: &CrunchrPlugin, frame: &mut Frame, area: Rect) {
         .borders(Borders::BOTTOM)
         .border_style(Style::new().fg(Theme::muted()));
 
-    frame.render_widget(
-        Paragraph::new(Line::from(spans)).block(block),
-        area,
-    );
+    frame.render_widget(Paragraph::new(Line::from(spans)).block(block), area);
 }
 
 /// Main content area: shows results+analytics, queue, or empty state
@@ -124,10 +144,14 @@ fn render_content(plugin: &CrunchrPlugin, frame: &mut Frame, area: Rect) {
     }
 
     // If queue has items and no search, show pipeline progress
-    let active_jobs: Vec<_> = plugin.queue.iter()
+    let active_jobs: Vec<_> = plugin
+        .queue
+        .iter()
         .filter(|j| j.state != PipelineState::Complete && j.state != PipelineState::Failed)
         .collect();
-    let recent_complete: Vec<_> = plugin.queue.iter()
+    let recent_complete: Vec<_> = plugin
+        .queue
+        .iter()
         .filter(|j| j.state == PipelineState::Complete || j.state == PipelineState::Failed)
         .take(5)
         .collect();
@@ -143,7 +167,9 @@ fn render_content(plugin: &CrunchrPlugin, frame: &mut Frame, area: Rect) {
         Line::raw(""),
         Line::styled(
             "  No transcripts yet",
-            Style::new().fg(Theme::secondary()).add_modifier(Modifier::BOLD),
+            Style::new()
+                .fg(Theme::secondary())
+                .add_modifier(Modifier::BOLD),
         ),
         Line::raw(""),
         Line::styled(
@@ -166,11 +192,9 @@ fn render_results_with_analytics(plugin: &CrunchrPlugin, frame: &mut Frame, area
     let analytics_height = if has_analytics { 7 } else { 0 };
 
     let areas = if has_analytics {
-        let [results_area, analytics_area] = Layout::vertical([
-            Constraint::Fill(1),
-            Constraint::Length(analytics_height),
-        ])
-        .areas(area);
+        let [results_area, analytics_area] =
+            Layout::vertical([Constraint::Fill(1), Constraint::Length(analytics_height)])
+                .areas(area);
         (results_area, Some(analytics_area))
     } else {
         (area, None)
@@ -190,7 +214,9 @@ fn render_results_list(plugin: &CrunchrPlugin, frame: &mut Frame, area: Rect) {
         let prefix = if is_selected { ">" } else { " " };
 
         let title_style = if is_selected {
-            Style::new().fg(Theme::primary()).add_modifier(Modifier::BOLD)
+            Style::new()
+                .fg(Theme::primary())
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::new().fg(Theme::fg())
         };
@@ -226,7 +252,12 @@ fn render_results_list(plugin: &CrunchrPlugin, frame: &mut Frame, area: Rect) {
         }
 
         // FTS snippet with highlight: split on >>> / <<<
-        render_highlighted_snippet(&result.snippet, max_snippet_width, snippet_style, &mut snippet_spans);
+        render_highlighted_snippet(
+            &result.snippet,
+            max_snippet_width,
+            snippet_style,
+            &mut snippet_spans,
+        );
 
         lines.push(Line::from(snippet_spans));
         lines.push(Line::raw(""));
@@ -243,8 +274,8 @@ fn render_results_list(plugin: &CrunchrPlugin, frame: &mut Frame, area: Rect) {
     frame.render_widget(paragraph, area);
 
     if plugin.search_results.len() * 3 > visible_height {
-        let mut scrollbar_state = ScrollbarState::new(plugin.search_results.len() * 3)
-            .position(scroll_offset);
+        let mut scrollbar_state =
+            ScrollbarState::new(plugin.search_results.len() * 3).position(scroll_offset);
         frame.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight),
             area,
@@ -254,8 +285,15 @@ fn render_results_list(plugin: &CrunchrPlugin, frame: &mut Frame, area: Rect) {
 }
 
 /// Render FTS snippet with >>> <<< markers converted to highlighted spans
-fn render_highlighted_snippet<'a>(snippet: &'a str, max_width: usize, base_style: Style, spans: &mut Vec<Span<'a>>) {
-    let highlight_style = Style::new().fg(Theme::primary()).add_modifier(Modifier::BOLD);
+fn render_highlighted_snippet<'a>(
+    snippet: &'a str,
+    max_width: usize,
+    base_style: Style,
+    spans: &mut Vec<Span<'a>>,
+) {
+    let highlight_style = Style::new()
+        .fg(Theme::primary())
+        .add_modifier(Modifier::BOLD);
     let mut remaining = max_width;
     let mut text = snippet;
 
@@ -299,11 +337,7 @@ fn render_highlighted_snippet<'a>(snippet: &'a str, max_width: usize, base_style
 }
 
 /// Analytics detail pane showing analysis for the selected result
-fn render_analytics_pane(
-    frame: &mut Frame,
-    area: Rect,
-    analysis: &super::types::AnalysisData,
-) {
+fn render_analytics_pane(frame: &mut Frame, area: Rect, analysis: &super::types::AnalysisData) {
     let block = Block::default()
         .borders(Borders::TOP)
         .border_style(Style::new().fg(Theme::muted()))
@@ -317,7 +351,11 @@ fn render_analytics_pane(
 
     // Summary
     if !analysis.summary.is_empty() {
-        let summary_display: String = analysis.summary.chars().take(inner.width as usize * 2).collect();
+        let summary_display: String = analysis
+            .summary
+            .chars()
+            .take(inner.width as usize * 2)
+            .collect();
         lines.push(Line::from(vec![
             Span::styled(" ", Style::new().fg(Theme::dim())),
             Span::styled(summary_display, Style::new().fg(Theme::fg())),
@@ -332,7 +370,10 @@ fn render_analytics_pane(
             if i > 0 {
                 topic_spans.push(Span::styled(", ", Style::new().fg(Theme::muted())));
             }
-            topic_spans.push(Span::styled(topic.as_str(), Style::new().fg(Theme::primary())));
+            topic_spans.push(Span::styled(
+                topic.as_str(),
+                Style::new().fg(Theme::primary()),
+            ));
         }
 
         if !analysis.topics.is_empty() && analysis.sentiment != "unknown" {
@@ -376,7 +417,9 @@ fn render_queue_inline(
         Line::raw(""),
         Line::styled(
             "  Processing Pipeline",
-            Style::new().fg(Theme::secondary()).add_modifier(Modifier::BOLD),
+            Style::new()
+                .fg(Theme::secondary())
+                .add_modifier(Modifier::BOLD),
         ),
         Line::raw(""),
     ];
@@ -442,7 +485,10 @@ fn render_queue_inline(
 fn render_footer(plugin: &CrunchrPlugin, frame: &mut Frame, area: Rect) {
     // Error state takes priority
     if let Some(ref error) = plugin.last_error {
-        let error_display: String = error.chars().take(area.width.saturating_sub(4) as usize).collect();
+        let error_display: String = error
+            .chars()
+            .take(area.width.saturating_sub(4) as usize)
+            .collect();
         let line = Line::from(vec![
             Span::styled(" ⚠ ", Style::new().fg(Theme::red())),
             Span::styled(error_display, Style::new().fg(Theme::red())),
@@ -452,17 +498,29 @@ fn render_footer(plugin: &CrunchrPlugin, frame: &mut Frame, area: Rect) {
     }
 
     // Contextual footer: queue status when active, word frequencies when idle
-    let pending = plugin.queue.iter()
+    let pending = plugin
+        .queue
+        .iter()
         .filter(|j| j.state != PipelineState::Complete && j.state != PipelineState::Failed)
         .count();
 
     let mut spans = Vec::new();
 
     if pending > 0 {
-        let complete = plugin.queue.iter().filter(|j| j.state == PipelineState::Complete).count();
+        let complete = plugin
+            .queue
+            .iter()
+            .filter(|j| j.state == PipelineState::Complete)
+            .count();
         spans.push(Span::styled(" Queue: ", Style::new().fg(Theme::dim())));
-        spans.push(Span::styled(format!("{pending} pending"), Style::new().fg(Theme::secondary())));
-        spans.push(Span::styled(format!(" / {complete} done"), Style::new().fg(Theme::dim())));
+        spans.push(Span::styled(
+            format!("{pending} pending"),
+            Style::new().fg(Theme::secondary()),
+        ));
+        spans.push(Span::styled(
+            format!(" / {complete} done"),
+            Style::new().fg(Theme::dim()),
+        ));
     } else if !plugin.word_frequencies.is_empty() {
         // Width-aware word frequency display
         let available = area.width.saturating_sub(7) as usize; // " Top: " prefix
@@ -521,10 +579,14 @@ pub fn render_queue(plugin: &CrunchrPlugin, frame: &mut Frame, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let active: Vec<_> = plugin.queue.iter()
+    let active: Vec<_> = plugin
+        .queue
+        .iter()
         .filter(|j| j.state != PipelineState::Complete && j.state != PipelineState::Failed)
         .collect();
-    let complete: Vec<_> = plugin.queue.iter()
+    let complete: Vec<_> = plugin
+        .queue
+        .iter()
         .filter(|j| j.state == PipelineState::Complete || j.state == PipelineState::Failed)
         .collect();
 
@@ -532,7 +594,12 @@ pub fn render_queue(plugin: &CrunchrPlugin, frame: &mut Frame, area: Rect) {
 }
 
 /// Recording picker view for manual triggering / batch processing.
-pub fn render_recording_picker(plugin: &CrunchrPlugin, frame: &mut Frame, area: Rect, app: &AppState) {
+pub fn render_recording_picker(
+    plugin: &CrunchrPlugin,
+    frame: &mut Frame,
+    area: Rect,
+    app: &AppState,
+) {
     let filter_label = match &plugin.picker.filter {
         RecordingFilter::All => "All".to_string(),
         RecordingFilter::ByChannel(ch) => format!("Channel: {ch}"),
@@ -549,22 +616,29 @@ pub fn render_recording_picker(plugin: &CrunchrPlugin, frame: &mut Frame, area: 
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let [content_area, footer_area] = Layout::vertical([
-        Constraint::Fill(1),
-        Constraint::Length(1),
-    ]).areas(inner);
+    let [content_area, footer_area] =
+        Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(inner);
 
     // Render recording list
-    let finished: Vec<_> = plugin.picker.visible_ids.iter()
+    let finished: Vec<_> = plugin
+        .picker
+        .visible_ids
+        .iter()
         .filter_map(|id| app.recordings.get(id))
         .collect();
 
     if finished.is_empty() {
         let lines = vec![
             Line::raw(""),
-            Line::styled("  No finished recordings to process", Style::new().fg(Theme::muted())),
+            Line::styled(
+                "  No finished recordings to process",
+                Style::new().fg(Theme::muted()),
+            ),
             Line::raw(""),
-            Line::styled("  Record a stream first, then come back here.", Style::new().fg(Theme::dim())),
+            Line::styled(
+                "  Record a stream first, then come back here.",
+                Style::new().fg(Theme::dim()),
+            ),
         ];
         frame.render_widget(Paragraph::new(lines), content_area);
     } else {
@@ -577,13 +651,22 @@ pub fn render_recording_picker(plugin: &CrunchrPlugin, frame: &mut Frame, area: 
 
             let title = rec.stream_title.as_deref().unwrap_or("Untitled");
             let title_style = if is_selected {
-                Style::new().fg(Theme::primary()).add_modifier(Modifier::BOLD)
+                Style::new()
+                    .fg(Theme::primary())
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::new().fg(Theme::fg())
             };
 
             lines.push(Line::from(vec![
-                Span::styled(format!("{prefix} {check} "), Style::new().fg(if is_checked { Theme::green() } else { Theme::dim() })),
+                Span::styled(
+                    format!("{prefix} {check} "),
+                    Style::new().fg(if is_checked {
+                        Theme::green()
+                    } else {
+                        Theme::dim()
+                    }),
+                ),
                 Span::styled(&rec.channel_name, Style::new().fg(Theme::secondary())),
                 Span::raw(" "),
                 Span::styled(title, title_style),
@@ -597,7 +680,8 @@ pub fn render_recording_picker(plugin: &CrunchrPlugin, frame: &mut Frame, area: 
     let hint = if sel_count > 0 {
         format!(" {sel_count} selected  [Enter] Process  [Space] Toggle  [f] Filter  [a] Select all  [Esc] Back")
     } else {
-        " [Enter] Process  [Space] Select  [f] Filter  [a] Select all  [Tab] Views  [Esc] Back".to_string()
+        " [Enter] Process  [Space] Select  [f] Filter  [a] Select all  [Tab] Views  [Esc] Back"
+            .to_string()
     };
     frame.render_widget(
         Paragraph::new(Line::styled(hint, Style::new().fg(Theme::muted()))),
@@ -607,7 +691,12 @@ pub fn render_recording_picker(plugin: &CrunchrPlugin, frame: &mut Frame, area: 
 
 /// Config modal overlay for the Crunchr plugin.
 pub fn render_config_modal(plugin: &CrunchrPlugin, frame: &mut Frame, area: Rect) {
-    let ConfigModalState::Active { selected_field, editing, .. } = plugin.config_modal else {
+    let ConfigModalState::Active {
+        selected_field,
+        editing,
+        ..
+    } = plugin.config_modal
+    else {
         return;
     };
 
@@ -615,13 +704,15 @@ pub fn render_config_modal(plugin: &CrunchrPlugin, frame: &mut Frame, area: Rect
         Constraint::Percentage(10),
         Constraint::Min(20),
         Constraint::Percentage(10),
-    ]).areas(area);
+    ])
+    .areas(area);
 
     let [_, center, _] = Layout::horizontal([
         Constraint::Percentage(15),
         Constraint::Min(50),
         Constraint::Percentage(15),
-    ]).areas(center_v);
+    ])
+    .areas(center_v);
 
     frame.render_widget(Clear, center);
 
@@ -641,7 +732,9 @@ pub fn render_config_modal(plugin: &CrunchrPlugin, frame: &mut Frame, area: Rect
     let inner = block.inner(center);
     frame.render_widget(block, center);
 
-    let Some(ref draft) = plugin.config_draft else { return };
+    let Some(ref draft) = plugin.config_draft else {
+        return;
+    };
 
     let mut lines = Vec::new();
     let mut field_idx = 0usize;
@@ -651,12 +744,16 @@ pub fn render_config_modal(plugin: &CrunchrPlugin, frame: &mut Frame, area: Rect
         let is_sel = idx == selected_field;
         let prefix = if is_sel { " > " } else { "   " };
         let label_style = if is_sel {
-            Style::new().fg(Theme::primary()).add_modifier(Modifier::BOLD)
+            Style::new()
+                .fg(Theme::primary())
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::new().fg(Theme::fg())
         };
         let val_style = if is_sel && editing && !is_toggle {
-            Style::new().fg(Theme::secondary()).add_modifier(Modifier::BOLD)
+            Style::new()
+                .fg(Theme::secondary())
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::new().fg(Theme::dim())
         };
@@ -665,12 +762,21 @@ pub fn render_config_modal(plugin: &CrunchrPlugin, frame: &mut Frame, area: Rect
             Span::styled(prefix.to_string(), label_style),
             Span::styled(format!("{label}: "), label_style),
             Span::styled(value.to_string(), val_style),
-            if is_sel && editing && !is_toggle { Span::styled("▌", Style::new().fg(Theme::primary())) } else { Span::raw("") },
+            if is_sel && editing && !is_toggle {
+                Span::styled("▌", Style::new().fg(Theme::primary()))
+            } else {
+                Span::raw("")
+            },
         ])
     };
 
     // Field 0: Enabled
-    lines.push(add_field("Enabled", if draft.enabled { "Yes" } else { "No" }, true, field_idx));
+    lines.push(add_field(
+        "Enabled",
+        if draft.enabled { "Yes" } else { "No" },
+        true,
+        field_idx,
+    ));
     field_idx += 1;
 
     // Field 1: Backend
@@ -678,19 +784,39 @@ pub fn render_config_modal(plugin: &CrunchrPlugin, frame: &mut Frame, area: Rect
     field_idx += 1;
 
     // Field 2: API Key Env
-    lines.push(add_field("API Key Env", draft.api_key_env.as_deref().unwrap_or(""), false, field_idx));
+    lines.push(add_field(
+        "API Key Env",
+        draft.api_key_env.as_deref().unwrap_or(""),
+        false,
+        field_idx,
+    ));
     field_idx += 1;
 
     // Field 3: Endpoint
-    lines.push(add_field("Endpoint", draft.endpoint.as_deref().unwrap_or(""), false, field_idx));
+    lines.push(add_field(
+        "Endpoint",
+        draft.endpoint.as_deref().unwrap_or(""),
+        false,
+        field_idx,
+    ));
     field_idx += 1;
 
     // Field 4: Whisper Model
-    lines.push(add_field("Whisper Model", draft.whisper_model.as_deref().unwrap_or("base"), false, field_idx));
+    lines.push(add_field(
+        "Whisper Model",
+        draft.whisper_model.as_deref().unwrap_or("base"),
+        false,
+        field_idx,
+    ));
     field_idx += 1;
 
     // Field 5: Analysis Enabled
-    lines.push(add_field("Analysis", if draft.analysis.enabled { "Yes" } else { "No" }, true, field_idx));
+    lines.push(add_field(
+        "Analysis",
+        if draft.analysis.enabled { "Yes" } else { "No" },
+        true,
+        field_idx,
+    ));
     field_idx += 1;
 
     // Tandem channels header
@@ -709,7 +835,9 @@ pub fn render_config_modal(plugin: &CrunchrPlugin, frame: &mut Frame, area: Rect
         let check = if is_checked { "[x]" } else { "[ ]" };
         let prefix = if is_sel { " > " } else { "   " };
         let style = if is_sel {
-            Style::new().fg(Theme::primary()).add_modifier(Modifier::BOLD)
+            Style::new()
+                .fg(Theme::primary())
+                .add_modifier(Modifier::BOLD)
         } else if is_checked {
             Style::new().fg(Theme::green())
         } else {
@@ -718,7 +846,14 @@ pub fn render_config_modal(plugin: &CrunchrPlugin, frame: &mut Frame, area: Rect
 
         lines.push(Line::from(vec![
             Span::styled(prefix.to_string(), style),
-            Span::styled(format!("{check} "), Style::new().fg(if is_checked { Theme::green() } else { Theme::dim() })),
+            Span::styled(
+                format!("{check} "),
+                Style::new().fg(if is_checked {
+                    Theme::green()
+                } else {
+                    Theme::dim()
+                }),
+            ),
             Span::styled(display.clone(), style),
         ]));
         field_idx += 1;
@@ -728,7 +863,9 @@ pub fn render_config_modal(plugin: &CrunchrPlugin, frame: &mut Frame, area: Rect
     lines.push(Line::raw(""));
     let save_sel = field_idx == selected_field;
     let save_style = if save_sel {
-        Style::new().fg(Theme::primary()).add_modifier(Modifier::BOLD)
+        Style::new()
+            .fg(Theme::primary())
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::new().fg(Theme::secondary())
     };
@@ -749,4 +886,127 @@ pub fn render_config_modal(plugin: &CrunchrPlugin, frame: &mut Frame, area: Rect
             .wrap(Wrap { trim: false }),
         inner,
     );
+}
+
+/// Render the Speaker Editor modal. Centred overlay listing every diarized
+/// speaker on the focused recording with a play-button per row and an
+/// inline-editable display label. Active row is shown with `> ` prefix; in
+/// edit mode the value gains a ▌ cursor (same pattern as the config modal).
+pub fn render_speaker_modal(plugin: &CrunchrPlugin, frame: &mut Frame, area: Rect) {
+    let SpeakerModalState::Active {
+        ref rows,
+        selected_row,
+        editing,
+        ref recording_id,
+        ref video_path,
+        ..
+    } = plugin.speaker_modal
+    else {
+        return;
+    };
+
+    let [_, center_v, _] = Layout::vertical([
+        Constraint::Percentage(10),
+        Constraint::Min(14),
+        Constraint::Percentage(10),
+    ])
+    .areas(area);
+    let [_, center, _] = Layout::horizontal([
+        Constraint::Percentage(10),
+        Constraint::Min(60),
+        Constraint::Percentage(10),
+    ])
+    .areas(center_v);
+
+    frame.render_widget(Clear, center);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Theme::border_focused())
+        .title(" Speaker Editor ")
+        .title_style(Theme::title());
+    let inner = block.inner(center);
+    frame.render_widget(block, center);
+
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(rows.len() + 6);
+
+    lines.push(Line::from(vec![
+        Span::styled("  Recording: ", Style::new().fg(Theme::dim())),
+        Span::styled(
+            recording_id.to_string(),
+            Style::new().fg(Theme::secondary()),
+        ),
+    ]));
+    if let Some(name) = video_path.file_name().and_then(|s| s.to_str()) {
+        lines.push(Line::from(vec![
+            Span::styled("  Source:    ", Style::new().fg(Theme::dim())),
+            Span::styled(name.to_string(), Style::new().fg(Theme::fg())),
+        ]));
+    }
+    lines.push(Line::raw(""));
+
+    lines.push(Line::from(vec![Span::styled(
+        format!(
+            "  {:<3} {:^8} {:>6} {:>14}  {}",
+            "#", "Sample", "Lines", "Speaking", "Label"
+        ),
+        Style::new().fg(Theme::dim()),
+    )]));
+
+    for (idx, row) in rows.iter().enumerate() {
+        let is_sel = idx == selected_row;
+        let prefix = if is_sel { " > " } else { "   " };
+        let label_style = if is_sel {
+            Style::new()
+                .fg(Theme::primary())
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::new().fg(Theme::fg())
+        };
+        let sample_text = if row.sample_path.is_some() {
+            "[▶ play]"
+        } else {
+            "[ — ]"
+        };
+        let sample_style = if row.sample_path.is_some() {
+            Style::new().fg(Theme::secondary())
+        } else {
+            Style::new().fg(Theme::muted())
+        };
+        let value_style = if is_sel && editing {
+            Style::new()
+                .fg(Theme::secondary())
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::new().fg(Theme::dim())
+        };
+        let mins = (row.total_secs / 60.0).floor() as i64;
+        let secs = (row.total_secs - mins as f64 * 60.0).round() as i64;
+        let time_text = format!("{mins}m {secs:02}s");
+
+        let mut spans = vec![
+            Span::styled(prefix.to_string(), label_style),
+            Span::styled(format!("{idx:<3} "), label_style),
+            Span::styled(format!("{sample_text:^8}"), sample_style),
+            Span::raw(" "),
+            Span::styled(format!("{:>6}", row.segment_count), label_style),
+            Span::raw(" "),
+            Span::styled(format!("{time_text:>14}"), label_style),
+            Span::raw("  "),
+            Span::styled(row.display_label.clone(), value_style),
+        ];
+        if is_sel && editing {
+            spans.push(Span::styled("▌", Style::new().fg(Theme::primary())));
+        }
+        lines.push(Line::from(spans));
+    }
+
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![Span::styled(
+        "  ↑/↓ select   ⏎ edit label   space play sample   ^s save   esc cancel",
+        Style::new().fg(Theme::dim()),
+    )]));
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }

@@ -70,7 +70,10 @@ impl TranscriptionBackend for WhisperCLIBackend {
                     continue;
                 }
                 Err(_) => {
-                    last_error = format!("whisper model {model} timed out after {}s", self.timeout_secs);
+                    last_error = format!(
+                        "whisper model {model} timed out after {}s",
+                        self.timeout_secs
+                    );
                     tracing::warn!("{last_error}");
                     continue;
                 }

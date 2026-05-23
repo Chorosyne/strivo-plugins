@@ -1,6 +1,6 @@
-use std::path::Path;
 use anyhow::Result;
 use rusqlite::Connection;
+use std::path::Path;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS channels (
@@ -50,7 +50,9 @@ pub fn upsert_channel(
          ON CONFLICT(url) DO UPDATE SET name = ?1, archive_dir = ?4",
         rusqlite::params![name, url, platform, archive_dir],
     )?;
-    let id = conn.query_row("SELECT id FROM channels WHERE url = ?1", [url], |r| r.get(0))?;
+    let id = conn.query_row("SELECT id FROM channels WHERE url = ?1", [url], |r| {
+        r.get(0)
+    })?;
     Ok(id)
 }
 
@@ -63,7 +65,9 @@ pub fn insert_videos(
         "INSERT OR IGNORE INTO videos (channel_id, video_id, title, upload_date, duration, playlist) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
     )?;
     for (vid, title, date, dur, playlist) in videos {
-        stmt.execute(rusqlite::params![channel_id, vid, title, date, dur, playlist])?;
+        stmt.execute(rusqlite::params![
+            channel_id, vid, title, date, dur, playlist
+        ])?;
     }
     Ok(())
 }
@@ -76,13 +80,17 @@ pub fn mark_downloaded(conn: &Connection, channel_id: i64, video_id: &str) -> Re
     Ok(())
 }
 
-pub fn get_pending_videos(conn: &Connection, channel_id: i64) -> Result<Vec<(String, String, String, Option<String>)>> {
+pub fn get_pending_videos(
+    conn: &Connection,
+    channel_id: i64,
+) -> Result<Vec<(String, String, String, Option<String>)>> {
     let mut stmt = conn.prepare(
         "SELECT video_id, title, upload_date, playlist FROM videos WHERE channel_id = ?1 AND downloaded = FALSE ORDER BY upload_date DESC",
     )?;
     let results = stmt
-        .query_map([channel_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
+        .query_map([channel_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(results)
 }
-

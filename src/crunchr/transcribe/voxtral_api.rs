@@ -22,10 +22,8 @@ impl VoxtralApiBackend {
 impl TranscriptionBackend for VoxtralApiBackend {
     async fn transcribe(&self, audio_path: &Path) -> Result<TranscriptionResult> {
         let audio_bytes = tokio::fs::read(audio_path).await?;
-        let audio_b64 = base64::Engine::encode(
-            &base64::engine::general_purpose::STANDARD,
-            &audio_bytes,
-        );
+        let audio_b64 =
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &audio_bytes);
 
         let file_name = audio_path
             .file_name()
@@ -33,9 +31,11 @@ impl TranscriptionBackend for VoxtralApiBackend {
             .unwrap_or("audio.wav");
 
         let request_body = serde_json::json!({
-            "model": "mistral-audio-latest",
+            "model": "voxtral-mini-latest",
             "temperature": 0.0,
             "response_format": "verbose_json",
+            "diarize": true,
+            "timestamp_granularities": ["segment"],
             "file": {
                 "data": audio_b64,
                 "name": file_name,
@@ -57,7 +57,10 @@ impl TranscriptionBackend for VoxtralApiBackend {
                 .text()
                 .await
                 .unwrap_or_else(|_| "unknown error".to_string());
-            anyhow::bail!("Voxtral API returned {status}: {}", body.chars().take(300).collect::<String>());
+            anyhow::bail!(
+                "Voxtral API returned {status}: {}",
+                body.chars().take(300).collect::<String>()
+            );
         }
 
         let parsed: serde_json::Value = response.json().await?;
@@ -74,7 +77,10 @@ impl TranscriptionBackend for VoxtralApiBackend {
                         start_sec: seg["start"].as_f64().unwrap_or(0.0),
                         end_sec: seg["end"].as_f64().unwrap_or(0.0),
                         text: seg["text"].as_str().unwrap_or("").trim().to_string(),
-                        speaker: seg["speaker"].as_str().map(String::from),
+                        speaker: seg["speaker_id"]
+                            .as_str()
+                            .or_else(|| seg["speaker"].as_str())
+                            .map(String::from),
                         confidence: seg["avg_logprob"].as_f64(),
                     })
                     .collect()

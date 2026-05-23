@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
-use uuid::Uuid;
 use strivo_core::platform::PlatformKind;
+use uuid::Uuid;
 
 /// Config modal state for the Archiver plugin.
 #[derive(Debug, Clone, PartialEq, Eq)]

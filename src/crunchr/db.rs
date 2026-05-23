@@ -133,7 +133,12 @@ pub fn insert_video(
     Ok(id)
 }
 
-pub fn update_video_status(conn: &Connection, recording_id: &str, status: &str, error: Option<&str>) -> Result<()> {
+pub fn update_video_status(
+    conn: &Connection,
+    recording_id: &str,
+    status: &str,
+    error: Option<&str>,
+) -> Result<()> {
     conn.execute(
         "UPDATE videos SET status = ?1, error_message = ?2 WHERE recording_id = ?3",
         rusqlite::params![status, error, recording_id],
@@ -141,7 +146,11 @@ pub fn update_video_status(conn: &Connection, recording_id: &str, status: &str, 
     Ok(())
 }
 
-pub fn update_video_audio_path(conn: &Connection, recording_id: &str, audio_path: &str) -> Result<()> {
+pub fn update_video_audio_path(
+    conn: &Connection,
+    recording_id: &str,
+    audio_path: &str,
+) -> Result<()> {
     conn.execute(
         "UPDATE videos SET audio_path = ?1 WHERE recording_id = ?2",
         rusqlite::params![audio_path, recording_id],
@@ -149,7 +158,11 @@ pub fn update_video_audio_path(conn: &Connection, recording_id: &str, audio_path
     Ok(())
 }
 
-pub fn update_video_transcript(conn: &Connection, recording_id: &str, transcript: &str) -> Result<()> {
+pub fn update_video_transcript(
+    conn: &Connection,
+    recording_id: &str,
+    transcript: &str,
+) -> Result<()> {
     conn.execute(
         "UPDATE videos SET transcript_text = ?1 WHERE recording_id = ?2",
         rusqlite::params![transcript, recording_id],
@@ -166,7 +179,9 @@ pub fn insert_segments(
         "INSERT OR REPLACE INTO segments (video_id, segment_index, start_sec, end_sec, text, speaker, confidence) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
     )?;
     for (idx, start, end, text, speaker, confidence) in segments {
-        stmt.execute(rusqlite::params![video_id, idx, start, end, text, speaker, confidence])?;
+        stmt.execute(rusqlite::params![
+            video_id, idx, start, end, text, speaker, confidence
+        ])?;
     }
     Ok(())
 }
@@ -219,19 +234,20 @@ pub fn fts_search(conn: &Connection, query: &str, limit: usize) -> Result<Vec<Se
          LIMIT ?2",
     )?;
 
-    let results = stmt.query_map(rusqlite::params![safe_query, limit], |row| {
-        Ok(SearchResult {
-            chunk_id: row.get(0)?,
-            video_title: row.get(1)?,
-            channel_name: row.get(2)?,
-            snippet: row.get(3)?,
-            start_sec: row.get(4)?,
-            end_sec: row.get(5)?,
-            score: row.get::<_, f64>(6)?.abs(),
-            video_path: row.get(7)?,
-        })
-    })?
-    .collect::<Result<Vec<_>, _>>()?;
+    let results = stmt
+        .query_map(rusqlite::params![safe_query, limit], |row| {
+            Ok(SearchResult {
+                chunk_id: row.get(0)?,
+                video_title: row.get(1)?,
+                channel_name: row.get(2)?,
+                snippet: row.get(3)?,
+                start_sec: row.get(4)?,
+                end_sec: row.get(5)?,
+                score: row.get::<_, f64>(6)?.abs(),
+                video_path: row.get(7)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
 
     Ok(results)
 }
@@ -247,7 +263,10 @@ pub fn get_top_words(conn: &Connection, limit: usize) -> Result<Vec<(String, i64
 }
 
 /// Get analysis data for a video that owns the given chunk.
-pub fn get_analysis_for_chunk(conn: &Connection, chunk_id: i64) -> Result<Option<super::types::AnalysisData>> {
+pub fn get_analysis_for_chunk(
+    conn: &Connection,
+    chunk_id: i64,
+) -> Result<Option<super::types::AnalysisData>> {
     let result = conn.query_row(
         "SELECT va.summary, va.topics, va.sentiment
          FROM video_analysis va
@@ -264,7 +283,11 @@ pub fn get_analysis_for_chunk(conn: &Connection, chunk_id: i64) -> Result<Option
     match result {
         Ok((summary, topics_json, sentiment)) => {
             let topics: Vec<String> = serde_json::from_str(&topics_json).unwrap_or_default();
-            Ok(Some(super::types::AnalysisData { summary, topics, sentiment }))
+            Ok(Some(super::types::AnalysisData {
+                summary,
+                topics,
+                sentiment,
+            }))
         }
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(e.into()),
@@ -303,7 +326,10 @@ pub fn get_video_id_by_recording(conn: &Connection, recording_id: &str) -> Resul
     }
 }
 
-pub fn get_segments_for_video(conn: &Connection, video_id: i64) -> Result<Vec<(usize, f64, f64, String)>> {
+pub fn get_segments_for_video(
+    conn: &Connection,
+    video_id: i64,
+) -> Result<Vec<(usize, f64, f64, String)>> {
     let mut stmt = conn.prepare(
         "SELECT segment_index, start_sec, end_sec, text FROM segments WHERE video_id = ?1 ORDER BY segment_index",
     )?;
@@ -313,4 +339,161 @@ pub fn get_segments_for_video(conn: &Connection, video_id: i64) -> Result<Vec<(u
         })?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(results)
+}
+
+/// Look up `(video_id, recording_id)` for a recording stored at the given
+/// `.mkv` path. Returns None when there's no row (e.g. recording hasn't gone
+/// through CrunchR yet).
+pub fn lookup_video_by_path(conn: &Connection, video_path: &str) -> Result<Option<(i64, String)>> {
+    let r = conn.query_row(
+        "SELECT id, recording_id FROM videos WHERE video_path = ?1",
+        [video_path],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+    );
+    match r {
+        Ok(v) => Ok(Some(v)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// One row per distinct speaker label on a given video, with line counts and
+/// total speaking time. Used by the Speaker Editor modal.
+#[derive(Debug, Clone)]
+pub struct SpeakerStat {
+    pub speaker: String,
+    pub segment_count: i64,
+    pub total_secs: f64,
+}
+
+pub fn load_speakers(conn: &Connection, video_id: i64) -> Result<Vec<SpeakerStat>> {
+    let mut stmt = conn.prepare(
+        "SELECT speaker, COUNT(*), COALESCE(SUM(end_sec - start_sec), 0.0)
+         FROM segments
+         WHERE video_id = ?1 AND speaker IS NOT NULL AND speaker != ''
+         GROUP BY speaker
+         ORDER BY SUM(end_sec - start_sec) DESC",
+    )?;
+    let rows = stmt
+        .query_map([video_id], |row| {
+            Ok(SpeakerStat {
+                speaker: row.get(0)?,
+                segment_count: row.get(1)?,
+                total_secs: row.get(2)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Rename one speaker label across all segments of a video. Returns the
+/// number of rows updated.
+pub fn rewrite_speaker_label(
+    conn: &Connection,
+    video_id: i64,
+    old_label: &str,
+    new_label: &str,
+) -> Result<usize> {
+    let n = conn.execute(
+        "UPDATE segments SET speaker = ?1 WHERE video_id = ?2 AND speaker = ?3",
+        rusqlite::params![new_label, video_id, old_label],
+    )?;
+    Ok(n)
+}
+
+/// Load every segment for a video, with speaker + confidence, in transcript
+/// order. Returned shape mirrors [`types::Segment`] so callers can rebuild
+/// sidecar files after a label rewrite without re-running the pipeline.
+pub fn load_full_segments(conn: &Connection, video_id: i64) -> Result<Vec<super::types::Segment>> {
+    let mut stmt = conn.prepare(
+        "SELECT segment_index, start_sec, end_sec, text, speaker, confidence
+         FROM segments
+         WHERE video_id = ?1
+         ORDER BY segment_index",
+    )?;
+    let rows = stmt
+        .query_map([video_id], |row| {
+            Ok(super::types::Segment {
+                index: row.get::<_, i64>(0)? as usize,
+                start_sec: row.get(1)?,
+                end_sec: row.get(2)?,
+                text: row.get(3)?,
+                speaker: row.get(4)?,
+                confidence: row.get(5)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn fresh_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        conn
+    }
+
+    fn seed_video(conn: &Connection, recording_id: &str) -> i64 {
+        insert_video(conn, recording_id, "Channel", "Title", "/tmp/video.mkv").unwrap()
+    }
+
+    #[test]
+    fn rewrite_speaker_label_updates_only_matching_rows() {
+        let conn = fresh_db();
+        let video_id = seed_video(&conn, "rec-1");
+
+        // Three segments: two by "Speaker 0", one by "Speaker 1".
+        let segs: Vec<(usize, f64, f64, &str, Option<&str>, Option<f64>)> = vec![
+            (0, 0.0, 1.0, "hi", Some("Speaker 0"), None),
+            (1, 1.0, 2.0, "yo", Some("Speaker 1"), None),
+            (2, 2.0, 3.0, "back", Some("Speaker 0"), None),
+        ];
+        insert_segments(&conn, video_id, &segs).unwrap();
+
+        // Sanity: load_speakers groups + counts correctly.
+        let speakers = load_speakers(&conn, video_id).unwrap();
+        assert_eq!(speakers.len(), 2);
+        let s0 = speakers.iter().find(|s| s.speaker == "Speaker 0").unwrap();
+        assert_eq!(s0.segment_count, 2);
+
+        // Rename Speaker 0 -> Alice; only those two rows change.
+        let changed = rewrite_speaker_label(&conn, video_id, "Speaker 0", "Alice").unwrap();
+        assert_eq!(changed, 2);
+
+        let after = load_speakers(&conn, video_id).unwrap();
+        assert!(after.iter().any(|s| s.speaker == "Alice"));
+        assert!(after.iter().any(|s| s.speaker == "Speaker 1"));
+        assert!(!after.iter().any(|s| s.speaker == "Speaker 0"));
+    }
+
+    #[test]
+    fn lookup_video_by_path_roundtrip() {
+        let conn = fresh_db();
+        let id = seed_video(&conn, "rec-2");
+        let got = lookup_video_by_path(&conn, "/tmp/video.mkv").unwrap();
+        assert_eq!(got, Some((id, "rec-2".to_string())));
+        assert_eq!(lookup_video_by_path(&conn, "/nope").unwrap(), None);
+    }
+
+    #[test]
+    fn load_full_segments_preserves_speakers_and_order() {
+        let conn = fresh_db();
+        let id = seed_video(&conn, "rec-3");
+        let segs: Vec<(usize, f64, f64, &str, Option<&str>, Option<f64>)> = vec![
+            (0, 0.0, 1.0, "one", Some("A"), Some(-0.1)),
+            (1, 1.0, 2.0, "two", None, None),
+            (2, 2.0, 3.0, "three", Some("B"), None),
+        ];
+        insert_segments(&conn, id, &segs).unwrap();
+        let loaded = load_full_segments(&conn, id).unwrap();
+        assert_eq!(loaded.len(), 3);
+        assert_eq!(loaded[0].speaker.as_deref(), Some("A"));
+        assert_eq!(loaded[1].speaker, None);
+        assert_eq!(loaded[2].speaker.as_deref(), Some("B"));
+    }
 }

@@ -18,6 +18,54 @@ pub enum ConfigModalState {
     },
 }
 
+/// One row in the Speaker Editor modal — a unique speaker label on the
+/// currently-selected recording, with quick stats and a path to a cached
+/// voice-sample clip.
+#[derive(Debug, Clone)]
+pub struct SpeakerRow {
+    /// Original label from the transcription backend (e.g. "Speaker 0").
+    /// Used as the WHERE clause on save.
+    pub original_label: String,
+    /// Editable display label. Defaults to `original_label`; the user can
+    /// rename to "Alice" etc. and Ctrl+S commits it.
+    pub display_label: String,
+    /// Number of segments this speaker holds.
+    pub segment_count: i64,
+    /// Total speaking time in seconds.
+    pub total_secs: f64,
+    /// Cached voice sample clip — `Some` when the slicer ran successfully,
+    /// `None` until the cache warms.
+    pub sample_path: Option<PathBuf>,
+}
+
+/// State for the Speaker Editor modal.
+#[derive(Debug, Clone)]
+pub enum SpeakerModalState {
+    /// Modal is hidden.
+    Hidden,
+    /// Modal is active for a specific recording.
+    Active {
+        recording_id: Uuid,
+        /// Internal DB primary key for the recording's video row. Used to
+        /// scope SQL UPDATE / SELECT to a single transcript.
+        video_id: i64,
+        /// Source `.mkv` so we can re-mux subtitles on save.
+        video_path: PathBuf,
+        /// Loaded speaker rows in display order.
+        rows: Vec<SpeakerRow>,
+        /// Index of the currently-selected row.
+        selected_row: usize,
+        /// Whether the selected row's `display_label` is being edited.
+        editing: bool,
+    },
+}
+
+impl SpeakerModalState {
+    pub fn is_active(&self) -> bool {
+        matches!(self, SpeakerModalState::Active { .. })
+    }
+}
+
 /// View modes within the Crunchr pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CrunchrView {
@@ -120,9 +168,13 @@ impl SearchMode {
         match self {
             Self::FullText => {
                 #[cfg(feature = "semantic-search")]
-                { Self::Semantic }
+                {
+                    Self::Semantic
+                }
                 #[cfg(not(feature = "semantic-search"))]
-                { Self::FullText }
+                {
+                    Self::FullText
+                }
             }
             #[cfg(feature = "semantic-search")]
             Self::Semantic => Self::FullText,

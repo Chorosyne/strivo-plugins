@@ -7,7 +7,11 @@ use uuid::Uuid;
 use super::types::{PipelineEvent, Segment};
 
 /// Extract audio from an MKV recording using ffmpeg.
-pub async fn extract_audio(recording_id: Uuid, video_path: PathBuf, output_dir: PathBuf) -> Box<dyn std::any::Any + Send> {
+pub async fn extract_audio(
+    recording_id: Uuid,
+    video_path: PathBuf,
+    output_dir: PathBuf,
+) -> Box<dyn std::any::Any + Send> {
     match extract_audio_inner(&video_path, &output_dir).await {
         Ok(audio_path) => Box::new(PipelineEvent::AudioExtracted {
             recording_id,
@@ -50,12 +54,15 @@ async fn extract_audio_inner(video_path: &Path, output_dir: &Path) -> Result<Pat
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("ffmpeg exited with {}: {}", output.status, stderr.chars().take(200).collect::<String>());
+        anyhow::bail!(
+            "ffmpeg exited with {}: {}",
+            output.status,
+            stderr.chars().take(200).collect::<String>()
+        );
     }
 
     Ok(audio_path)
 }
-
 
 /// Segment chunker: 512-token target with sentence-boundary splitting
 pub fn chunk_segments(segments: &[Segment], target_tokens: usize) -> Vec<Chunk> {
@@ -78,7 +85,9 @@ pub fn chunk_segments(segments: &[Segment], target_tokens: usize) -> Vec<Chunk> 
         let seg_tokens = estimate_tokens(seg_text);
 
         // If adding this segment exceeds target and we have content, finalize chunk
-        if current_tokens + seg_tokens > (target_tokens as f64 * 1.2) as usize && !current_texts.is_empty() {
+        if current_tokens + seg_tokens > (target_tokens as f64 * 1.2) as usize
+            && !current_texts.is_empty()
+        {
             let chunk_text = normalize_text(&current_texts.join(" "));
             chunks.push(Chunk {
                 text: chunk_text,
@@ -238,19 +247,16 @@ pub fn word_frequencies(text: &str) -> Vec<(String, usize)> {
 
 fn is_stopword(word: &str) -> bool {
     const STOPWORDS: &[&str] = &[
-        "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for",
-        "of", "with", "by", "from", "is", "it", "that", "this", "was", "are",
-        "be", "have", "has", "had", "do", "does", "did", "will", "would",
-        "could", "should", "may", "might", "can", "shall", "not", "no",
-        "if", "then", "else", "so", "as", "up", "out", "about", "into",
-        "over", "after", "before", "between", "under", "above", "below",
-        "all", "each", "every", "both", "few", "more", "most", "other",
-        "some", "such", "only", "own", "same", "than", "too", "very",
-        "just", "because", "through", "during", "while", "also", "back",
-        "been", "being", "here", "there", "when", "where", "which", "who",
-        "whom", "what", "how", "its", "my", "your", "his", "her", "our",
-        "their", "them", "they", "we", "you", "he", "she", "me", "him",
-        "us", "im", "ive", "dont", "youre", "youve", "were", "weve",
+        "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by",
+        "from", "is", "it", "that", "this", "was", "are", "be", "have", "has", "had", "do", "does",
+        "did", "will", "would", "could", "should", "may", "might", "can", "shall", "not", "no",
+        "if", "then", "else", "so", "as", "up", "out", "about", "into", "over", "after", "before",
+        "between", "under", "above", "below", "all", "each", "every", "both", "few", "more",
+        "most", "other", "some", "such", "only", "own", "same", "than", "too", "very", "just",
+        "because", "through", "during", "while", "also", "back", "been", "being", "here", "there",
+        "when", "where", "which", "who", "whom", "what", "how", "its", "my", "your", "his", "her",
+        "our", "their", "them", "they", "we", "you", "he", "she", "me", "him", "us", "im", "ive",
+        "dont", "youre", "youve", "were", "weve",
     ];
     STOPWORDS.contains(&word)
 }
@@ -301,13 +307,22 @@ mod tests {
         let mut segs = Vec::new();
         for i in 0..100 {
             let start = i as f64 * 2.0;
-            segs.push(make_segment(i, start, start + 2.0, "This is a somewhat longer segment with several words in it."));
+            segs.push(make_segment(
+                i,
+                start,
+                start + 2.0,
+                "This is a somewhat longer segment with several words in it.",
+            ));
         }
         let chunks = chunk_segments(&segs, 50);
         assert!(chunks.len() > 1);
 
         // All text should be preserved (no data loss)
-        let total_text: String = chunks.iter().map(|c| c.text.clone()).collect::<Vec<_>>().join(" ");
+        let total_text: String = chunks
+            .iter()
+            .map(|c| c.text.clone())
+            .collect::<Vec<_>>()
+            .join(" ");
         assert!(total_text.contains("somewhat longer"));
     }
 
@@ -318,8 +333,15 @@ mod tests {
             make_segment(0, 0.0, 10.0, "First sentence here. Second sentence here. Third sentence here. Fourth sentence here. Fifth sentence here."),
         ];
         let chunks = chunk_segments(&segs, 10); // Very low target to force splitting
-        let all_text: String = chunks.iter().map(|c| c.text.clone()).collect::<Vec<_>>().join(" ");
-        assert!(all_text.contains("Fifth"), "Remainder text was dropped! Got: {all_text}");
+        let all_text: String = chunks
+            .iter()
+            .map(|c| c.text.clone())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            all_text.contains("Fifth"),
+            "Remainder text was dropped! Got: {all_text}"
+        );
     }
 
     #[test]

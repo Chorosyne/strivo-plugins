@@ -4,7 +4,7 @@ First-party plugins for [StriVo](https://github.com/revelri/strivo).
 
 | Plugin    | Purpose                                                                 |
 |-----------|-------------------------------------------------------------------------|
-| `crunchr` | AI transcription + analysis (Whisper CLI, Voxtral, Mistral, OpenRouter) |
+| `crunchr` | AI transcription + diarization + analysis (Voxtral via OpenRouter [default], Mistral direct, WhisperX/pyannote local, self-hosted Voxtral, Whisper CLI). Speaker Editor TUI modal renames per-recording labels, voice-sample auditioning, SRT/VTT export, mkvmerge soft-sub embed. |
 | `archiver`| Recording organization + gallery rendering                              |
 
 ## Using

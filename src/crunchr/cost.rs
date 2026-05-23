@@ -26,19 +26,63 @@ pub struct Pricing {
 /// `analysis.openrouter_api_key_env` flow round-trips cleanly.
 pub const PRICING: &[Pricing] = &[
     // OpenRouter — Mistral family
-    Pricing { model: "mistralai/mistral-7b-instruct",     prompt_per_1k: 0.00007, completion_per_1k: 0.00007 },
-    Pricing { model: "mistralai/mistral-small",           prompt_per_1k: 0.0002,  completion_per_1k: 0.0006 },
-    Pricing { model: "mistralai/mistral-large",           prompt_per_1k: 0.003,   completion_per_1k: 0.009 },
-    Pricing { model: "mistralai/mixtral-8x7b-instruct",   prompt_per_1k: 0.00024, completion_per_1k: 0.00024 },
-    Pricing { model: "mistralai/mixtral-8x22b-instruct",  prompt_per_1k: 0.0012,  completion_per_1k: 0.0012 },
+    Pricing {
+        model: "mistralai/mistral-7b-instruct",
+        prompt_per_1k: 0.00007,
+        completion_per_1k: 0.00007,
+    },
+    Pricing {
+        model: "mistralai/mistral-small",
+        prompt_per_1k: 0.0002,
+        completion_per_1k: 0.0006,
+    },
+    Pricing {
+        model: "mistralai/mistral-large",
+        prompt_per_1k: 0.003,
+        completion_per_1k: 0.009,
+    },
+    Pricing {
+        model: "mistralai/mixtral-8x7b-instruct",
+        prompt_per_1k: 0.00024,
+        completion_per_1k: 0.00024,
+    },
+    Pricing {
+        model: "mistralai/mixtral-8x22b-instruct",
+        prompt_per_1k: 0.0012,
+        completion_per_1k: 0.0012,
+    },
     // OpenRouter — Anthropic
-    Pricing { model: "anthropic/claude-3-haiku",          prompt_per_1k: 0.00025, completion_per_1k: 0.00125 },
-    Pricing { model: "anthropic/claude-3-sonnet",         prompt_per_1k: 0.003,   completion_per_1k: 0.015 },
-    Pricing { model: "anthropic/claude-3-opus",           prompt_per_1k: 0.015,   completion_per_1k: 0.075 },
-    Pricing { model: "anthropic/claude-3.5-sonnet",       prompt_per_1k: 0.003,   completion_per_1k: 0.015 },
+    Pricing {
+        model: "anthropic/claude-3-haiku",
+        prompt_per_1k: 0.00025,
+        completion_per_1k: 0.00125,
+    },
+    Pricing {
+        model: "anthropic/claude-3-sonnet",
+        prompt_per_1k: 0.003,
+        completion_per_1k: 0.015,
+    },
+    Pricing {
+        model: "anthropic/claude-3-opus",
+        prompt_per_1k: 0.015,
+        completion_per_1k: 0.075,
+    },
+    Pricing {
+        model: "anthropic/claude-3.5-sonnet",
+        prompt_per_1k: 0.003,
+        completion_per_1k: 0.015,
+    },
     // OpenRouter — OpenAI
-    Pricing { model: "openai/gpt-4o-mini",                prompt_per_1k: 0.00015, completion_per_1k: 0.0006 },
-    Pricing { model: "openai/gpt-4o",                     prompt_per_1k: 0.0025,  completion_per_1k: 0.01 },
+    Pricing {
+        model: "openai/gpt-4o-mini",
+        prompt_per_1k: 0.00015,
+        completion_per_1k: 0.0006,
+    },
+    Pricing {
+        model: "openai/gpt-4o",
+        prompt_per_1k: 0.0025,
+        completion_per_1k: 0.01,
+    },
     // Whisper (transcription): per minute of audio, not per token —
     // included here for the table-of-record. Consumers requesting a
     // Pricing for these slugs will hit the heuristic fallback.

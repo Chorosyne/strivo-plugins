@@ -1,3 +1,8 @@
+# Marks this crate as its own workspace root so the submodule checkout can be
+# built independently (the host repo at ../ is a separate workspace and would
+# otherwise claim ownership).
+[workspace]
+
 [package]
 name = "strivo-plugins"
 version = "0.3.0"
@@ -44,6 +49,7 @@ rusqlite = { version = "0.33", features = ["bundled"] }
 rust-stemmers = "1.2"
 unicode-segmentation = "1.12"
 base64 = "0.22"
+which = "7"
 
 [profile.release]
 strip = true

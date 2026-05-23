@@ -84,7 +84,10 @@ Respond in this exact JSON format (no markdown, just raw JSON):
             .text()
             .await
             .unwrap_or_else(|_| "unknown error".to_string());
-        anyhow::bail!("OpenRouter API returned {status}: {}", body.chars().take(300).collect::<String>());
+        anyhow::bail!(
+            "OpenRouter API returned {status}: {}",
+            body.chars().take(300).collect::<String>()
+        );
     }
 
     let parsed: serde_json::Value = response.json().await?;
@@ -105,20 +108,19 @@ Respond in this exact JSON format (no markdown, just raw JSON):
         .unwrap_or("{}");
 
     // Parse the LLM's JSON response
-    let analysis: serde_json::Value = serde_json::from_str(content)
-        .unwrap_or_else(|_| {
-            // Fallback: try to extract from markdown code blocks
-            let cleaned = content
-                .trim()
-                .strip_prefix("```json")
-                .unwrap_or(content)
-                .strip_prefix("```")
-                .unwrap_or(content)
-                .strip_suffix("```")
-                .unwrap_or(content)
-                .trim();
-            serde_json::from_str(cleaned).unwrap_or_default()
-        });
+    let analysis: serde_json::Value = serde_json::from_str(content).unwrap_or_else(|_| {
+        // Fallback: try to extract from markdown code blocks
+        let cleaned = content
+            .trim()
+            .strip_prefix("```json")
+            .unwrap_or(content)
+            .strip_prefix("```")
+            .unwrap_or(content)
+            .strip_suffix("```")
+            .unwrap_or(content)
+            .trim();
+        serde_json::from_str(cleaned).unwrap_or_default()
+    });
 
     Ok(AnalysisResult {
         summary: analysis["summary"]
