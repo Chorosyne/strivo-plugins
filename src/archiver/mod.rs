@@ -833,6 +833,48 @@ impl Plugin for ArchiverPlugin {
         ]
     }
 
+    fn on_verb(
+        &mut self,
+        verb: &str,
+        selection: &[uuid::Uuid],
+        app: &AppState,
+    ) -> Vec<PluginAction> {
+        // M2 — actions popup dispatched an Archiver verb. We use the
+        // first recording in the selection to identify which channel
+        // to re-scan (the verb operates at channel granularity, not
+        // per-recording).
+        match verb {
+            "Re-archive channel" => {
+                let Some(rec_id) = selection.first() else {
+                    return Vec::new();
+                };
+                let Some(rec) = app.recordings.get(rec_id) else {
+                    return Vec::new();
+                };
+                let channel_id = rec.channel_id.clone();
+                let Some(channel) = self
+                    .channels
+                    .iter()
+                    .find(|c| c.id == channel_id)
+                    .cloned()
+                else {
+                    return vec![PluginAction::SetStatus(format!(
+                        "Re-archive: channel '{}' not in cached list",
+                        rec.channel_name
+                    ))];
+                };
+                let mut actions = self.start_archive(&channel);
+                actions.push(PluginAction::SetStatus(format!(
+                    "Re-archive started: {}",
+                    channel.display_name
+                )));
+                actions.push(PluginAction::ActivatePane(PANE_ID));
+                actions
+            }
+            _ => Vec::new(),
+        }
+    }
+
     fn panes(&self) -> Vec<PaneId> {
         vec![PANE_ID]
     }

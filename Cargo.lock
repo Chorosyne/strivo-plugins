@@ -3374,7 +3374,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 [[package]]
 name = "strivo-core"
 version = "0.3.0"
-source = "git+https://github.com/Chorosyne/strivo?branch=main#1a6c9d1e9d3d95cf7509b1a4106c0230be584dff"
+source = "git+https://github.com/Chorosyne/strivo?branch=main#4a7624bcb7a89d338cbd48dc7903260fee952c5c"
 dependencies = [
  "anyhow",
  "async-trait",

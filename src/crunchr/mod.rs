@@ -2049,6 +2049,66 @@ impl Plugin for CrunchrPlugin {
         ]
     }
 
+    fn on_verb(
+        &mut self,
+        verb: &str,
+        selection: &[Uuid],
+        app: &AppState,
+    ) -> Vec<PluginAction> {
+        // M2 — actions popup dispatched a Crunchr verb. `selection`
+        // already carries the multi-select set or the cursor row.
+        match verb {
+            "Re-transcribe" => {
+                let mut actions: Vec<PluginAction> = Vec::new();
+                let mut queued = 0usize;
+                for rec_id in selection {
+                    // Drop any in-flight copy so the re-queue starts
+                    // fresh; queue_recording short-circuits when the
+                    // job is otherwise present, so this is the safe
+                    // way to ask for a fresh run.
+                    self.in_flight.remove(rec_id);
+                    self.queue.retain(|j| j.recording_id != *rec_id);
+                    if let Some(rec) = app.recordings.get(rec_id) {
+                        actions.extend(self.queue_recording(
+                            *rec_id,
+                            rec.channel_name.clone(),
+                            rec.stream_title
+                                .clone()
+                                .unwrap_or_else(|| "Recording".to_string()),
+                            rec.output_path.clone(),
+                        ));
+                        queued += 1;
+                    }
+                }
+                actions.push(PluginAction::SetStatus(format!(
+                    "Re-transcribe queued ({queued} recording{})",
+                    if queued == 1 { "" } else { "s" }
+                )));
+                actions.push(PluginAction::ActivatePane(PANE_ID));
+                actions
+            }
+            "Show transcript" => {
+                // Switch to Crunchr search filtered to the cursor
+                // recording's title. Multi-select shows the first.
+                if let Some(rec_id) = selection.first() {
+                    if let Some(rec) = app.recordings.get(rec_id) {
+                        self.view = CrunchrView::Search;
+                        self.search_query = rec
+                            .stream_title
+                            .clone()
+                            .unwrap_or_else(|| rec.channel_name.clone());
+                        // Search results refresh on the next render
+                        // via the existing prev_selected debounce.
+                        self.selected_result = 0;
+                        self.prev_selected = usize::MAX;
+                    }
+                }
+                vec![PluginAction::ActivatePane(PANE_ID)]
+            }
+            _ => Vec::new(),
+        }
+    }
+
     fn panes(&self) -> Vec<PaneId> {
         vec![PANE_ID]
     }
