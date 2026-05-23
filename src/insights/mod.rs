@@ -30,6 +30,8 @@ use strivo_core::plugin::{
 
 pub mod export;
 pub mod frequency;
+pub mod speakers;
+pub mod topics;
 
 pub const INSIGHTS_PANE: PaneId = "insights";
 
@@ -40,6 +42,16 @@ pub struct InsightsPlugin {
     /// Word-frequency data for the currently-loaded recording (or aggregate
     /// across all recordings if `selected_recording_id` is None).
     cached_freq: Vec<frequency::FrequencyRow>,
+    /// Speaker airtime rows for the focused recording. (I2.)
+    cached_airtime: Vec<speakers::SpeakerAirtime>,
+    /// Sentiment band for the focused recording. (I2.)
+    cached_sentiment: Option<speakers::SentimentPoint>,
+    /// Cross-recording topic graph rows. (I3.)
+    cached_topics: Vec<topics::TopicRow>,
+    /// I5 sheet stack — drill-down trail. Each entry stores the view
+    /// the user came from so 'q' returns there. Top of stack is the
+    /// current view.
+    sheet_stack: Vec<InsightsView>,
     cursor: usize,
     show_stopwords: bool,
     /// Last status string surfaced via [`Plugin::status_line`].
@@ -68,6 +80,10 @@ impl InsightsPlugin {
             db_path: PathBuf::new(),
             view: InsightsView::Frequency,
             cached_freq: Vec::new(),
+            cached_airtime: Vec::new(),
+            cached_sentiment: None,
+            cached_topics: Vec::new(),
+            sheet_stack: Vec::new(),
             cursor: 0,
             show_stopwords: false,
             last_status: None,
@@ -109,6 +125,57 @@ impl InsightsPlugin {
                 self.last_status = Some(format!("query failed: {e}"));
             }
         }
+    }
+
+    /// Walk video_analysis.topics across the corpus. (I3.)
+    fn refresh_topics(&mut self) {
+        let conn = match self.open_conn() {
+            Ok(c) => c,
+            Err(e) => {
+                self.last_status = Some(format!("crunchr.db unavailable: {e}"));
+                return;
+            }
+        };
+        self.cached_topics = topics::cross_recording_topics(&conn).unwrap_or_default();
+        self.last_status = Some(format!("{} distinct topics", self.cached_topics.len()));
+    }
+
+    /// Push a new view onto the sheet stack. (I5.) Used by drill-down
+    /// callsites that the topic / speaker views will land in a
+    /// follow-up commit (today the tab keys 1/2/3 do an in-place swap
+    /// for backwards-compat with M3 muscle memory).
+    #[allow(dead_code)]
+    fn push_view(&mut self, view: InsightsView) {
+        self.sheet_stack.push(self.view);
+        self.view = view;
+    }
+
+    /// Pop back to the previous view; no-op when the stack is empty. (I5.)
+    fn pop_view(&mut self) -> bool {
+        if let Some(prev) = self.sheet_stack.pop() {
+            self.view = prev;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Pull airtime + sentiment for the focused recording. (I2.)
+    fn refresh_speakers(&mut self, app: &AppState) {
+        let Some(rec_id) = app.selected_recording_id.map(|u| u.to_string()) else {
+            self.cached_airtime.clear();
+            self.cached_sentiment = None;
+            return;
+        };
+        let conn = match self.open_conn() {
+            Ok(c) => c,
+            Err(e) => {
+                self.last_status = Some(format!("crunchr.db unavailable: {e}"));
+                return;
+            }
+        };
+        self.cached_airtime = speakers::airtime_for_recording(&conn, &rec_id).unwrap_or_default();
+        self.cached_sentiment = speakers::sentiment_for_recording(&conn, &rec_id).ok().flatten();
     }
 }
 
@@ -186,8 +253,21 @@ impl Plugin for InsightsPlugin {
                 };
             }
             Char('1') => self.view = InsightsView::Frequency,
-            Char('2') => self.view = InsightsView::Speakers,
-            Char('3') => self.view = InsightsView::Topics,
+            Char('2') => {
+                self.view = InsightsView::Speakers;
+                self.refresh_speakers(app);
+            }
+            Char('3') => {
+                self.view = InsightsView::Topics;
+                self.refresh_topics();
+            }
+            Char('q') => {
+                self.pop_view();
+            }
+            Char('Q') => {
+                self.sheet_stack.clear();
+                self.view = InsightsView::Frequency;
+            }
             _ => {}
         }
         Vec::new()
@@ -246,18 +326,13 @@ impl Plugin for InsightsPlugin {
         // Body
         match self.view {
             InsightsView::Frequency => render_frequency_body(frame, body_area, &self.cached_freq, self.cursor),
-            InsightsView::Speakers => render_stub(
+            InsightsView::Speakers => render_speakers_body(
                 frame,
                 body_area,
-                "Speaker airtime + sentiment trend",
-                "I2 stub — landing in M5. Today the data is in segments + video_analysis.",
+                &self.cached_airtime,
+                self.cached_sentiment.as_ref(),
             ),
-            InsightsView::Topics => render_stub(
-                frame,
-                body_area,
-                "Cross-recording topic graph",
-                "I3 stub — landing in M5. Today topics live in video_analysis.topics JSON.",
-            ),
+            InsightsView::Topics => render_topics_body(frame, body_area, &self.cached_topics),
         }
 
         // Hint bar
@@ -364,6 +439,118 @@ fn render_frequency_body(
     );
 }
 
+/// Speakers view body — stacked horizontal bar of speaker airtime
+/// plus a one-line sentiment label. (I2.)
+fn render_speakers_body(
+    frame: &mut Frame,
+    area: Rect,
+    rows: &[speakers::SpeakerAirtime],
+    sentiment: Option<&speakers::SentimentPoint>,
+) {
+    if rows.is_empty() {
+        let p = Paragraph::new(
+            "No speaker data. Select a recording with diarization applied (quality-local / quality-api preset).",
+        )
+        .style(Style::new().add_modifier(Modifier::DIM));
+        frame.render_widget(p, area);
+        return;
+    }
+    let total: f64 = rows.iter().map(|r| r.seconds).sum();
+    let bar_width = area.width.saturating_sub(28) as usize;
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(Span::styled(
+        format!("Airtime over {:.0}s of speech", total),
+        Style::new().add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::raw(""));
+    for r in rows {
+        let frac = if total > 0.0 { r.seconds / total } else { 0.0 };
+        let bar_len = (frac * bar_width as f64).round() as usize;
+        let bar: String = "█".repeat(bar_len);
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{:<14}", truncate(&r.speaker, 14)),
+                Style::new().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+            Span::raw(bar),
+            Span::raw(" "),
+            Span::styled(
+                format!("{:.0}s ({:.0}%)", r.seconds, frac * 100.0),
+                Style::new().add_modifier(Modifier::DIM),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                format!("{} segs", r.segments),
+                Style::new().add_modifier(Modifier::DIM),
+            ),
+        ]));
+    }
+    lines.push(Line::raw(""));
+    if let Some(point) = sentiment {
+        let band_style = match &point.label {
+            speakers::SentimentBand::Positive => Style::new().add_modifier(Modifier::BOLD),
+            speakers::SentimentBand::Negative => Style::new().add_modifier(Modifier::BOLD).add_modifier(Modifier::REVERSED),
+            _ => Style::new().add_modifier(Modifier::DIM),
+        };
+        lines.push(Line::from(vec![
+            Span::styled("Sentiment ", Style::new().add_modifier(Modifier::DIM)),
+            Span::styled(point.label.label().to_string(), band_style),
+        ]));
+    } else {
+        lines.push(Line::from(Span::styled(
+            "Sentiment unavailable — run analysis on the recording first.",
+            Style::new().add_modifier(Modifier::DIM),
+        )));
+    }
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+}
+
+/// Topics view body — count-sorted topic chips. (I3.)
+fn render_topics_body(frame: &mut Frame, area: Rect, rows: &[topics::TopicRow]) {
+    if rows.is_empty() {
+        let p = Paragraph::new(
+            "No analyzed transcripts yet. Run an analysis-enabled preset (quality-api with crunchr.analysis.enabled = true).",
+        )
+        .style(Style::new().add_modifier(Modifier::DIM));
+        frame.render_widget(p, area);
+        return;
+    }
+    let max = rows.iter().map(|r| r.count).max().unwrap_or(1).max(1);
+    let bar_width = area.width.saturating_sub(40) as usize;
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(Span::styled(
+        format!("Distinct topics across {} entries", rows.len()),
+        Style::new().add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::raw(""));
+    for r in rows.iter().take(area.height.saturating_sub(2) as usize) {
+        let bar_len = (r.count as f64 / max as f64 * bar_width as f64).round() as usize;
+        let bar: String = "█".repeat(bar_len);
+        let span_str = if r.first_seen == r.last_seen {
+            format!(" {}", r.first_seen)
+        } else {
+            format!(" {} → {}", r.first_seen, r.last_seen)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{:<22}", truncate(&r.topic, 22)),
+                Style::new().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+            Span::raw(bar),
+            Span::raw(" "),
+            Span::styled(
+                format!("×{}", r.count),
+                Style::new().add_modifier(Modifier::DIM),
+            ),
+            Span::styled(span_str, Style::new().add_modifier(Modifier::DIM)),
+        ]));
+    }
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+}
+
+#[allow(dead_code)] // retained for future stub views
 fn render_stub(frame: &mut Frame, area: Rect, title: &str, body: &str) {
     let lines = vec![
         Line::from(Span::styled(
