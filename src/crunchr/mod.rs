@@ -2177,7 +2177,7 @@ impl Plugin for CrunchrPlugin {
         &mut self,
         verb: &str,
         selection: &[Uuid],
-        app: &AppState,
+        ctx: &strivo_core::plugin::VerbContext,
     ) -> Vec<PluginAction> {
         // M2 — actions popup dispatched a Crunchr verb. `selection`
         // already carries the multi-select set or the cursor row.
@@ -2192,7 +2192,7 @@ impl Plugin for CrunchrPlugin {
                     // way to ask for a fresh run.
                     self.in_flight.remove(rec_id);
                     self.queue.retain(|j| j.recording_id != *rec_id);
-                    if let Some(rec) = app.recordings.get(rec_id) {
+                    if let Some(rec) = ctx.recordings.get(rec_id) {
                         actions.extend(self.queue_recording(
                             *rec_id,
                             rec.channel_name.clone(),
@@ -2215,7 +2215,7 @@ impl Plugin for CrunchrPlugin {
                 // Switch to Crunchr search filtered to the cursor
                 // recording's title. Multi-select shows the first.
                 if let Some(rec_id) = selection.first() {
-                    if let Some(rec) = app.recordings.get(rec_id) {
+                    if let Some(rec) = ctx.recordings.get(rec_id) {
                         self.view = CrunchrView::Search;
                         self.search_query = rec
                             .stream_title

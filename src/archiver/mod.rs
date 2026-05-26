@@ -837,7 +837,7 @@ impl Plugin for ArchiverPlugin {
         &mut self,
         verb: &str,
         selection: &[uuid::Uuid],
-        app: &AppState,
+        ctx: &strivo_core::plugin::VerbContext,
     ) -> Vec<PluginAction> {
         // M2 — actions popup dispatched an Archiver verb. We use the
         // first recording in the selection to identify which channel
@@ -848,7 +848,7 @@ impl Plugin for ArchiverPlugin {
                 let Some(rec_id) = selection.first() else {
                     return Vec::new();
                 };
-                let Some(rec) = app.recordings.get(rec_id) else {
+                let Some(rec) = ctx.recordings.get(rec_id) else {
                     return Vec::new();
                 };
                 let channel_id = rec.channel_id.clone();
