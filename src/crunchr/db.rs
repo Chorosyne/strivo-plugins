@@ -577,6 +577,128 @@ pub fn load_full_segments(conn: &Connection, video_id: i64) -> Result<Vec<super:
     Ok(rows)
 }
 
+/// One row in the web/TUI "transcribed recordings" list. Read-only summary
+/// joining segment + analysis counts so a list view needs a single query.
+#[derive(Debug, Clone)]
+pub struct VideoSummary {
+    pub recording_id: String,
+    pub channel_name: String,
+    pub title: String,
+    pub status: String,
+    pub segment_count: i64,
+    pub has_analysis: bool,
+    pub created_at: String,
+}
+
+/// Every video Crunchr has touched, newest first. Used by the webui's
+/// Crunchr page to list transcribed recordings.
+pub fn list_videos(conn: &Connection) -> Result<Vec<VideoSummary>> {
+    let mut stmt = conn.prepare(
+        "SELECT v.recording_id, v.channel_name, v.title, v.status, \
+                (SELECT COUNT(*) FROM segments s WHERE s.video_id = v.id) AS segs, \
+                (SELECT COUNT(*) FROM video_analysis a WHERE a.video_id = v.id) AS has_an, \
+                COALESCE(v.created_at, '') \
+         FROM videos v ORDER BY v.created_at DESC",
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(VideoSummary {
+                recording_id: row.get(0)?,
+                channel_name: row.get(1)?,
+                title: row.get(2)?,
+                status: row.get(3)?,
+                segment_count: row.get(4)?,
+                has_analysis: row.get::<_, i64>(5)? > 0,
+                created_at: row.get(6)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Full transcript + analysis for one recording, in a single read. `segments`
+/// is empty when the recording hasn't been transcribed yet; analysis fields
+/// are None until the LLM pass completes. Returns None when Crunchr has never
+/// seen the recording.
+#[derive(Debug, Clone)]
+pub struct RecordingDetail {
+    pub recording_id: String,
+    pub channel_name: String,
+    pub title: String,
+    pub status: String,
+    pub segments: Vec<super::types::Segment>,
+    pub summary: Option<String>,
+    pub topics: Vec<String>,
+    pub sentiment: Option<String>,
+}
+
+pub fn recording_detail(conn: &Connection, recording_id: &str) -> Result<Option<RecordingDetail>> {
+    let head = conn.query_row(
+        "SELECT id, channel_name, title, status FROM videos WHERE recording_id = ?1",
+        [recording_id],
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        },
+    );
+    let (video_id, channel_name, title, status) = match head {
+        Ok(v) => v,
+        Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+
+    let segments = load_full_segments(conn, video_id)?;
+
+    let analysis: Option<(Option<String>, Option<String>, Option<String>)> = conn
+        .query_row(
+            "SELECT summary, topics, sentiment FROM video_analysis WHERE video_id = ?1",
+            [video_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .ok();
+
+    let (summary, topics, sentiment) = match analysis {
+        Some((s, t, sent)) => (s, parse_topics_field(t.as_deref()), sent),
+        None => (None, Vec::new(), None),
+    };
+
+    Ok(Some(RecordingDetail {
+        recording_id: recording_id.to_string(),
+        channel_name,
+        title,
+        status,
+        segments,
+        summary,
+        topics,
+        sentiment,
+    }))
+}
+
+/// `video_analysis.topics` is either a JSON array of strings or (from older
+/// analysis runs) a comma-separated string. Normalize both to a Vec.
+fn parse_topics_field(raw: Option<&str>) -> Vec<String> {
+    let Some(raw) = raw else { return Vec::new() };
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Vec::new();
+    }
+    if let Ok(serde_json::Value::Array(arr)) = serde_json::from_str::<serde_json::Value>(raw) {
+        return arr
+            .into_iter()
+            .filter_map(|v| v.as_str().map(|s| s.trim().to_string()))
+            .filter(|s| !s.is_empty())
+            .collect();
+    }
+    raw.split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -646,5 +768,61 @@ mod tests {
         assert_eq!(loaded[0].speaker.as_deref(), Some("A"));
         assert_eq!(loaded[1].speaker, None);
         assert_eq!(loaded[2].speaker.as_deref(), Some("B"));
+    }
+
+    #[test]
+    fn list_videos_reports_counts_and_analysis_flag() {
+        let conn = fresh_db();
+        let v1 = insert_video(&conn, "rec-a", "ChanA", "First", "/tmp/a.mkv").unwrap();
+        insert_video(&conn, "rec-b", "ChanB", "Second", "/tmp/b.mkv").unwrap();
+        let segs: Vec<(usize, f64, f64, &str, Option<&str>, Option<f64>)> =
+            vec![(0, 0.0, 1.0, "hi", None, None), (1, 1.0, 2.0, "yo", None, None)];
+        insert_segments(&conn, v1, &segs).unwrap();
+        conn.execute(
+            "INSERT INTO video_analysis (video_id, summary, topics, sentiment) VALUES (?1, 'sum', '[\"x\"]', 'positive')",
+            [v1],
+        )
+        .unwrap();
+
+        let vids = list_videos(&conn).unwrap();
+        assert_eq!(vids.len(), 2);
+        let a = vids.iter().find(|v| v.recording_id == "rec-a").unwrap();
+        assert_eq!(a.segment_count, 2);
+        assert!(a.has_analysis);
+        let b = vids.iter().find(|v| v.recording_id == "rec-b").unwrap();
+        assert_eq!(b.segment_count, 0);
+        assert!(!b.has_analysis);
+    }
+
+    #[test]
+    fn recording_detail_composes_transcript_and_analysis() {
+        let conn = fresh_db();
+        let id = insert_video(&conn, "rec-d", "Chan", "Talk", "/tmp/d.mkv").unwrap();
+        let segs: Vec<(usize, f64, f64, &str, Option<&str>, Option<f64>)> =
+            vec![(0, 0.0, 2.0, "hello world", Some("Alice"), None)];
+        insert_segments(&conn, id, &segs).unwrap();
+        conn.execute(
+            "INSERT INTO video_analysis (video_id, summary, topics, sentiment) VALUES (?1, 'A chat', '[\"news\",\"sports\"]', 'neutral')",
+            [id],
+        )
+        .unwrap();
+
+        let d = recording_detail(&conn, "rec-d").unwrap().unwrap();
+        assert_eq!(d.title, "Talk");
+        assert_eq!(d.segments.len(), 1);
+        assert_eq!(d.segments[0].speaker.as_deref(), Some("Alice"));
+        assert_eq!(d.summary.as_deref(), Some("A chat"));
+        assert_eq!(d.topics, vec!["news".to_string(), "sports".to_string()]);
+        assert_eq!(d.sentiment.as_deref(), Some("neutral"));
+
+        assert!(recording_detail(&conn, "missing").unwrap().is_none());
+    }
+
+    #[test]
+    fn parse_topics_field_handles_json_and_csv() {
+        assert_eq!(parse_topics_field(Some("[\"a\", \"b\"]")), vec!["a", "b"]);
+        assert_eq!(parse_topics_field(Some("a, b ,c")), vec!["a", "b", "c"]);
+        assert!(parse_topics_field(Some("")).is_empty());
+        assert!(parse_topics_field(None).is_empty());
     }
 }

@@ -94,3 +94,111 @@ pub fn get_pending_videos(
         .collect::<Result<Vec<_>, _>>()?;
     Ok(results)
 }
+
+/// One archived channel with rollup counts. Used by the webui's Archiver
+/// page to list catalogs without an N+1 query per channel.
+#[derive(Debug, Clone)]
+pub struct ChannelRow {
+    pub id: i64,
+    pub name: String,
+    pub url: String,
+    pub platform: String,
+    pub archive_dir: String,
+    pub last_scan: Option<String>,
+    pub video_count: i64,
+    pub downloaded_count: i64,
+}
+
+/// Every tracked channel, newest-scanned first, with catalog rollups.
+pub fn list_channels(conn: &Connection) -> Result<Vec<ChannelRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT c.id, c.name, c.url, c.platform, c.archive_dir, c.last_scan, \
+                (SELECT COUNT(*) FROM videos v WHERE v.channel_id = c.id) AS total, \
+                (SELECT COUNT(*) FROM videos v WHERE v.channel_id = c.id AND v.downloaded) AS got \
+         FROM channels c ORDER BY c.last_scan DESC NULLS LAST, c.name",
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(ChannelRow {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                url: row.get(2)?,
+                platform: row.get(3)?,
+                archive_dir: row.get(4)?,
+                last_scan: row.get(5)?,
+                video_count: row.get(6)?,
+                downloaded_count: row.get(7)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// One catalog entry (downloaded or pending).
+#[derive(Debug, Clone)]
+pub struct VideoRow {
+    pub video_id: String,
+    pub title: String,
+    pub upload_date: Option<String>,
+    pub duration: Option<f64>,
+    pub playlist: Option<String>,
+    pub downloaded: bool,
+}
+
+/// Every catalog entry for a channel, newest upload first.
+pub fn list_videos(conn: &Connection, channel_id: i64) -> Result<Vec<VideoRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT video_id, title, upload_date, duration, playlist, downloaded \
+         FROM videos WHERE channel_id = ?1 ORDER BY upload_date DESC",
+    )?;
+    let rows = stmt
+        .query_map([channel_id], |row| {
+            Ok(VideoRow {
+                video_id: row.get(0)?,
+                title: row.get(1)?,
+                upload_date: row.get(2)?,
+                duration: row.get(3)?,
+                playlist: row.get(4)?,
+                downloaded: row.get(5)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fresh() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        conn
+    }
+
+    #[test]
+    fn list_channels_and_videos_roll_up_download_state() {
+        let conn = fresh();
+        let cid = upsert_channel(&conn, "Alpha", "https://t/alpha", "Twitch", "/arc/alpha").unwrap();
+        let vids = vec![
+            ("v1".to_string(), "One".to_string(), "20260101".to_string(), Some(60.0), None),
+            ("v2".to_string(), "Two".to_string(), "20260102".to_string(), None, Some("pl".to_string())),
+        ];
+        insert_videos(&conn, cid, &vids).unwrap();
+        mark_downloaded(&conn, cid, "v1").unwrap();
+
+        let chans = list_channels(&conn).unwrap();
+        assert_eq!(chans.len(), 1);
+        assert_eq!(chans[0].video_count, 2);
+        assert_eq!(chans[0].downloaded_count, 1);
+        assert_eq!(chans[0].platform, "Twitch");
+
+        let listed = list_videos(&conn, cid).unwrap();
+        assert_eq!(listed.len(), 2);
+        // Newest upload first.
+        assert_eq!(listed[0].video_id, "v2");
+        assert!(!listed[0].downloaded);
+        let v1 = listed.iter().find(|v| v.video_id == "v1").unwrap();
+        assert!(v1.downloaded);
+    }
+}

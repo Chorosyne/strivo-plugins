@@ -1,6 +1,6 @@
 pub mod analysis;
 pub mod cost;
-mod db;
+pub mod db;
 mod pipeline;
 pub mod presets;
 pub mod render;

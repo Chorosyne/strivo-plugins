@@ -1,4 +1,4 @@
-mod db;
+pub mod db;
 mod downloader;
 pub mod render;
 mod scanner;
