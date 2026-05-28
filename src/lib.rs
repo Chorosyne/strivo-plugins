@@ -14,3 +14,4 @@ pub mod crunchr;
 pub mod dirs;
 pub mod editor;
 pub mod insights;
+pub mod viewguard;
