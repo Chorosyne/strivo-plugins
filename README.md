@@ -1,49 +1,101 @@
+<div align="center">
+
 # strivo-plugins
 
-> [!IMPORTANT]
-> **Superseded — this repository is archived and read-only.**
->
-> Both plugins now live inside the main [StriVo](https://github.com/revoydotdev/strivo)
-> repository as the in-tree workspace crate `crates/strivo-plugins`. StriVo no longer
-> consumes this repo as a git dependency, and development continues there.
->
-> Nothing here is maintained. Use `revoydotdev/strivo`.
+### Historical first-party plugins for StriVo
 
+[![Status: archived](https://img.shields.io/badge/status-archived%20%2F%20read--only-6b7280)](https://github.com/revoydotdev/strivo-plugins)
+[![License: MIT](https://img.shields.io/badge/license-MIT-2563eb.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/Rust-2021-ed7b17?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 
-First-party plugins for [StriVo](https://github.com/revoydotdev/strivo).
+**This repository is preserved for history. Current StriVo development lives in the [main StriVo workspace](https://github.com/revoydotdev/strivo).**
 
-| Plugin    | Purpose                                                                 |
-|-----------|-------------------------------------------------------------------------|
-| `crunchr` | AI transcription + diarization + analysis (Voxtral via OpenRouter [default], Mistral direct, WhisperX/pyannote local, self-hosted Voxtral, Whisper CLI). Speaker Editor TUI modal renames per-recording labels, voice-sample auditioning, SRT/VTT export, mkvmerge soft-sub embed. |
-| `archiver`| Recording organization + gallery rendering                              |
+</div>
 
-## Using
+> [!WARNING]
+> **Archived and read-only.** This repository contains the former standalone
+> implementation of StriVo's `Crunchr` and `Archiver` plugins. It is not
+> maintained, does not accept feature work, and is not a supported dependency
+> for current StriVo releases. The plugins were moved into the active StriVo
+> workspace at [`crates/strivo-plugins/`](https://github.com/revoydotdev/strivo/tree/main/crates/strivo-plugins).
 
-StriVo itself depends on this crate, so installing StriVo (e.g. via the AUR)
-gives you both plugins out of the box. If you're building from source:
+## What this archive preserves
+
+This crate is a snapshot of two early, first-party Rust plugins that integrated
+with StriVo's Ratatui-based host and stored their local state in SQLite.
+
+| Plugin | Historical role | Notable preserved behavior |
+| --- | --- | --- |
+| `crunchr` | Recording transcription and analysis | Whisper CLI, a self-hosted Voxtral-compatible endpoint, or the Mistral audio API; transcript search; optional OpenRouter summary, topic, and sentiment analysis |
+| `archiver` | Back-catalog acquisition | Twitch and YouTube archive scanning and `yt-dlp` downloads, with SQLite-backed progress and archive tracking |
+
+The source remains useful for understanding the original plugin shape and its
+evolution. It is not documentation for the current Creator Edition, a
+packaging guide, or a compatibility layer.
+
+## Where current work belongs
+
+Use [**revoydotdev/strivo**](https://github.com/revoydotdev/strivo) for a
+working installation, current documentation, bugs, security reports, and
+contributions. The active repository builds the first-party plugins in-tree,
+so host and plugin changes share one workspace and one dependency graph.
 
 ```bash
-git clone https://github.com/revoydotdev/strivo-plugins.git ../strivo-plugins
 git clone https://github.com/revoydotdev/strivo.git
-cd strivo && cargo build --release
+cd strivo
+cargo build -p strivo-plugins
 ```
 
-The two repos must live side-by-side (`../strivo-plugins` is a path dependency
-of `strivo`).
+For the Creator Edition binary, follow the active host's
+[README](https://github.com/revoydotdev/strivo#the-two-editions) and
+[contribution guide](https://github.com/revoydotdev/strivo/blob/main/CONTRIBUTING.md).
+Those documents, along with the current `Cargo.toml`, are authoritative.
 
-## Writing your own plugin
+## Compatibility boundary
 
-Implement the `strivo::plugin::Plugin` trait in a new crate that depends on
-`strivo` as a library:
+This archive targets an earlier standalone host contract. It makes **no** API,
+ABI, configuration, database-schema, or toolchain compatibility promise with
+current StriVo.
 
-```toml
-[dependencies]
-strivo = { git = "https://github.com/revoydotdev/strivo", tag = "v0.3.0" }
+- Do not add this crate as a dependency of a current StriVo checkout, and do
+  not copy its `strivo-core` dependency setup into new projects.
+- Do not load a binary built from this archive into a current StriVo process.
+  Rust trait-object plugin loading requires the exact host build, dependency
+  closure, feature set, and `rustc` toolchain; mismatches can crash the host or
+  corrupt memory.
+- Do not treat the historical backends, configuration names, environment
+  variables, paths, or keybindings here as current product documentation.
+
+For the current third-party-plugin constraints, see StriVo's
+[plugin manifest documentation](https://github.com/revoydotdev/strivo/blob/main/docs/PLUGIN-MANIFEST.md).
+
+## Inspecting the archive
+
+The repository can still be cloned for source review or a historically pinned
+reproduction without presenting this snapshot as a supported build target:
+
+```bash
+git clone https://github.com/revoydotdev/strivo-plugins.git
+cd strivo-plugins
+git log -1 --oneline
 ```
 
-Register your plugin in a fork of StriVo's `main.rs`, or wait for dynamic
-plugin loading (roadmap).
+Building this snapshot requires the matching historical StriVo source,
+dependency versions, and Rust toolchain. If your goal is to run or extend the
+plugins, use the active workspace instead of attempting to bridge this archive
+to a modern release.
 
-## License
+## Contributing and security
 
-[MIT](LICENSE)
+This archive is read-only: please do not open pull requests or feature issues
+here. Report current behavior in the
+[StriVo issue tracker](https://github.com/revoydotdev/strivo/issues), and use
+its [private security-advisory channel](https://github.com/revoydotdev/strivo/security/advisories/new)
+for vulnerabilities. Third-party tool issues belong with their respective
+maintainers.
+
+## Provenance and license
+
+The code and documentation preserved in this repository remain available under
+the [MIT License](LICENSE). Archiving the repository changes its maintenance
+status, not the license or provenance of this historical snapshot.
